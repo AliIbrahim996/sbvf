@@ -28,6 +28,7 @@ class ExternalEndpoint:
     vuln: str                 # "xss" | "sqli"
     label: str = "unknown"    # "vulnerable" for documented points, else "unknown"
     note: str = ""
+    extra: dict | None = None  # fixed extra query params (e.g. DVWA's Submit=Submit)
 
 
 # --- Known injection points for DSVW (Damn Small Vulnerable Web, @stamparm) -------
@@ -89,7 +90,7 @@ def run_external(base_url: str, endpoints, runs: int, budget: int,
             confirmed, evals = 0, []
             for seed in seeds:
                 t = Target(base_url, allow_remote=allow_remote, cookies=cookies)
-                o = Oracle(t, e.path, e.param, e.vuln)
+                o = Oracle(t, e.path, e.param, e.vuln, extra=e.extra)
                 res = method(o, budget, seed)
                 if res.confirmed:
                     confirmed += 1

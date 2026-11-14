@@ -66,29 +66,36 @@ class Oracle:
     """Binds a vulnerability type to an endpoint and evaluates a single individual."""
 
     def __init__(self, target: Target, path: str, param: str | None, vuln: str,
-                 selenium_checker=None, low_priv_token: str = "u1"):
+                 selenium_checker=None, low_priv_token: str = "u1",
+                 extra: dict | None = None):
         self.target = target
         self.path = path
         self.param = param
         self.vuln = vuln
         self.selenium = selenium_checker
         self.low_priv_token = low_priv_token  # identity used for access-control tests
+        self.extra = extra or {}  # fixed extra query params (e.g. DVWA's Submit=Submit)
         self._baseline = None  # cached benign response for boolean-based SQLi
+
+    def _params(self, payload) -> dict:
+        p = dict(self.extra)
+        p[self.param] = payload
+        return p
 
     def evaluate(self, individual) -> tuple[float, bool]:
         payload = individual.render()
         if self.vuln == "xss":
-            r = self.target.get(self.path, {self.param: payload})
+            r = self.target.get(self.path, self._params(payload))
             fit, confirmed = F.xss_fitness(payload, r.body)
             if confirmed and self.selenium is not None:
                 confirmed = self.selenium.confirm_xss(self.path, self.param, payload)
             return fit, confirmed
         if self.vuln == "sqli":
-            r = self.target.get(self.path, {self.param: payload})
+            r = self.target.get(self.path, self._params(payload))
             # Benign baseline, constant per endpoint, fetched once for boolean detection.
             if self._baseline is None:
                 self._baseline = self.target.get(
-                    self.path, {self.param: "zzz_no_such_value"})
+                    self.path, self._params("zzz_no_such_value"))
             return F.sqli_fitness(payload, r, self._baseline)
         if self.vuln == "idor":
             # Act as the low-privilege user; the payload is the object id tried.
