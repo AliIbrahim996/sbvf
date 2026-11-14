@@ -4,6 +4,9 @@ docs/
 # Generated experiment output
 results/
 
+# Downloaded third-party apps (acquired on demand by the scanner)
+external/
+
 # Python
 __pycache__/
 *.py[cod]
