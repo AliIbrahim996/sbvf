@@ -59,6 +59,17 @@ python -m sbvf.scan_repo \
 The framework only talks to a local base URL; `--allow-remote` is required for anything
 else and is intended solely for a local lab instance you are authorized to test.
 
+### Bundled real-app targets (DVWA, OWASP Juice Shop)
+
+```bash
+docker compose --profile labs up -d dvwa juice-shop   # DVWA :8081, Juice Shop :3000
+python -m sbvf.integrations --app all --runs 15 --budget 60
+```
+
+`sbvf/integrations.py` logs into DVWA (resets its DB, selects the "low" security level)
+and targets Juice Shop's SQL-injectable product-search API. Observed result: the search
+methods find the flaws in ~2 evaluations versus ~9–10 for the fixed-list Static baseline.
+
 ## Docker
 
 ```bash
