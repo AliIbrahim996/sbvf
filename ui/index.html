@@ -213,7 +213,7 @@ function drawBars(){
 }
 function esc(s){return (s||"").replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));}
 function logLine(rec){
-  if(!rec.confirmed) { if(rec.label==="safe"){} else return; }
+  if(!rec.confirmed) return;   // only stream actual confirmations (hits and true false-positives)
   const log=el("log");
   if(logN===0) log.innerHTML="";
   const atBottom=log.scrollTop+log.clientHeight>=log.scrollHeight-24;
