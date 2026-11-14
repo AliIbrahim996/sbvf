@@ -54,6 +54,22 @@ GRAMMARS = {
     # search algorithms create individuals uniformly, while the oracle ignores the
     # rendered string and inspects response headers instead.
     "clickjacking": {"pre": [""], "core": [""], "post": [""]},
+    # IDOR: the "payload" is an object identifier the low-privilege user tries to read.
+    # The search enumerates the id space looking for one that belongs to another owner.
+    "idor": {
+        "pre": [""],
+        "core": ["1", "2", "3", "4", "5", "6", "7", "8", "9", "10",
+                 "42", "100", "101", "1000", "1001", "1002", "9999"],
+        "post": [""],
+    },
+    # RBAC: the "payload" is a privilege-escalation vector (a tampered parameter) that a
+    # non-admin user submits in an attempt to reach an admin-only action.
+    "rbac": {
+        "pre": [""],
+        "core": ["", "role=admin", "admin=1", "is_admin=true", "isAdmin=1",
+                 "role=superuser", "priv=admin", "access=admin", "level=9"],
+        "post": [""],
+    },
 }
 
 # Character-level transforms used for filter evasion.

@@ -58,12 +58,13 @@ class Oracle:
     """Binds a vulnerability type to an endpoint and evaluates a single individual."""
 
     def __init__(self, target: Target, path: str, param: str | None, vuln: str,
-                 selenium_checker=None):
+                 selenium_checker=None, low_priv_token: str = "u1"):
         self.target = target
         self.path = path
         self.param = param
         self.vuln = vuln
         self.selenium = selenium_checker
+        self.low_priv_token = low_priv_token  # identity used for access-control tests
         self._baseline = None  # cached benign response for boolean-based SQLi
 
     def evaluate(self, individual) -> tuple[float, bool]:
@@ -81,6 +82,20 @@ class Oracle:
                 self._baseline = self.target.get(
                     self.path, {self.param: "zzz_no_such_value"})
             return F.sqli_fitness(payload, r, self._baseline)
+        if self.vuln == "idor":
+            # Act as the low-privilege user; the payload is the object id tried.
+            r = self.target.get(self.path, {self.param: payload,
+                                            "token": self.low_priv_token})
+            return F.idor_fitness(r.body, r.status, self.low_priv_token)
+        if self.vuln == "rbac":
+            # Non-admin request plus an optional tampered key=value escalation vector.
+            params = {"token": self.low_priv_token}
+            vec = payload.strip()
+            if "=" in vec:
+                k, v = vec.split("=", 1)
+                params[k] = v
+            r = self.target.get(self.path, params)
+            return F.rbac_fitness(r.body, r.status)
         if self.vuln == "clickjacking":
             r = self.target.get(self.path)
             framed = None

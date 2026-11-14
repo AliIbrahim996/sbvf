@@ -82,6 +82,38 @@ def _looks_positive(body: str) -> bool:
     return bool(m and int(m.group(1)) > 0)
 
 
+def idor_fitness(body: str, status: int, my_token: str) -> tuple[float, bool]:
+    """IDOR fitness for a low-privilege identity `my_token`.
+
+    Confirmed when the response discloses an object owned by a *different* user
+    (an owner marker that is not mine, together with a secret). A 200 for my own
+    object is partial progress; a 403/404 is a dead end.
+    """
+    if status in (401, 403, 404):
+        return 0.0, False
+    m = re.search(r"owner=(\w+)", body)
+    has_secret = "secret=" in body or "FLAG" in body
+    if m and has_secret:
+        if m.group(1) != my_token:
+            return 1.0, True            # read another user's record -> IDOR confirmed
+        return 0.4, False               # reached a record, but it is my own
+    return 0.2 if status == 200 else 0.0, False
+
+
+def rbac_fitness(body: str, status: int) -> tuple[float, bool]:
+    """RBAC / broken-access-control fitness for a non-admin identity.
+
+    Confirmed when admin-only content is served to the non-admin caller.
+    """
+    if status in (401, 403):
+        return 0.0, False
+    if status == 200 and "ADMIN_ONLY" in body:
+        return 1.0, True                # privileged content reached as non-admin
+    if status == 200:
+        return 0.5, False               # authenticated but no privilege escalation yet
+    return 0.1, False
+
+
 def clickjacking_fitness(headers: dict, framed_ok: bool | None = None) -> tuple[float, bool]:
     """Clickjacking fitness: absence of header protection (+ iframe-load confirmation
     via Selenium when available)."""
