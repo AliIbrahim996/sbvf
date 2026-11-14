@@ -173,6 +173,12 @@
 
   <div class="card" style="margin-top:16px">
     <h2>Efficiency · evals-to-first-detection <span class="tag">Mann-Whitney U · Vargha-Delaney Â12</span></h2>
+    <p style="margin:-6px 0 14px;color:var(--muted);font-size:12.5px;line-height:1.6">
+      For each vulnerable endpoint both methods cracked, how many payload attempts each needed before the first
+      hit (fewer = better). <b style="color:var(--txt);font-weight:500">Med A / Med B</b>: median attempts per method.
+      <b style="color:var(--txt);font-weight:500">p-value</b>: is the gap real? (&lt;0.05 = yes).
+      <b style="color:var(--txt);font-weight:500">Â12</b>: chance A beats B (0.50 = no difference).
+    </p>
     <table id="eff"><thead><tr>
       <th>Endpoint</th><th>Comparison</th><th>Med A</th><th>Med B</th>
       <th>p-value</th><th>Â12</th><th>Effect</th><th>Significant</th>

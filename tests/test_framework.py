@@ -18,6 +18,7 @@ from sbvf.individual import GRAMMARS, Individual, crossover  # noqa: E402
 from sbvf.algorithms import ALGORITHMS                       # noqa: E402
 from sbvf.oracles import Oracle, Target                      # noqa: E402
 import testbed.app as app                                    # noqa: E402
+import testbed.apps.authapp as authapp                        # noqa: E402
 
 
 class TestIndividual(unittest.TestCase):
@@ -64,6 +65,28 @@ class TestFitness(unittest.TestCase):
     def test_clickjacking_vulnerable(self):
         fit, conf = fitness.clickjacking_fitness({})
         self.assertTrue(conf)
+
+    def test_idor_confirmed_on_other_owner(self):
+        fit, conf = fitness.idor_fitness("owner=u2 secret=x", 200, my_token="u1")
+        self.assertEqual(fit, 1.0)
+        self.assertTrue(conf)
+
+    def test_idor_not_confirmed_on_own_record(self):
+        fit, conf = fitness.idor_fitness("owner=u1 secret=x", 200, my_token="u1")
+        self.assertFalse(conf)
+
+    def test_idor_forbidden_is_dead_end(self):
+        fit, conf = fitness.idor_fitness("forbidden", 403, my_token="u1")
+        self.assertEqual(fit, 0.0)
+        self.assertFalse(conf)
+
+    def test_rbac_confirmed_on_admin_content(self):
+        fit, conf = fitness.rbac_fitness("ADMIN_ONLY dashboard", 200)
+        self.assertTrue(conf)
+
+    def test_rbac_forbidden_not_confirmed(self):
+        fit, conf = fitness.rbac_fitness("forbidden", 403)
+        self.assertFalse(conf)
 
 
 class TestStats(unittest.TestCase):
@@ -126,6 +149,40 @@ class TestIntegration(unittest.TestCase):
             Oracle(t, "/clickjacking/vuln", None, "clickjacking"), 10, 0).confirmed)
         self.assertFalse(ALGORITHMS["RS"](
             Oracle(t, "/clickjacking/safe", None, "clickjacking"), 10, 0).confirmed)
+
+
+class TestAccessControl(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.srv = ThreadingHTTPServer(("127.0.0.1", 0), authapp.H)
+        cls.port = cls.srv.server_address[1]
+        threading.Thread(target=cls.srv.serve_forever, daemon=True).start()
+        time.sleep(0.2)
+        cls.base = f"http://127.0.0.1:{cls.port}"
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.srv.shutdown()
+
+    def test_idor_vulnerable_detected(self):
+        o = Oracle(Target(self.base), "/idor/account", "id", "idor")
+        self.assertTrue(ALGORITHMS["GA"](o, 200, 0).confirmed)
+
+    def test_idor_safe_clean(self):
+        o = Oracle(Target(self.base), "/idor/account_safe", "id", "idor")
+        self.assertFalse(ALGORITHMS["RS"](o, 200, 0).confirmed)
+
+    def test_rbac_missing_check_detected(self):
+        o = Oracle(Target(self.base), "/rbac/admin", None, "rbac")
+        self.assertTrue(ALGORITHMS["RS"](o, 50, 0).confirmed)
+
+    def test_rbac_tampering_detected(self):
+        o = Oracle(Target(self.base), "/rbac/dashboard", None, "rbac")
+        self.assertTrue(ALGORITHMS["GA"](o, 200, 0).confirmed)
+
+    def test_rbac_safe_clean(self):
+        o = Oracle(Target(self.base), "/rbac/admin_safe", None, "rbac")
+        self.assertFalse(ALGORITHMS["CS"](o, 200, 0).confirmed)
 
 
 if __name__ == "__main__":
