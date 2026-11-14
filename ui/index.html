@@ -1,0 +1,280 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SBVF · Search-Based Vulnerability Framework</title>
+<style>
+  :root{
+    --bg:#070b16; --bg2:#0b1222; --panel:#0e1627; --panel2:#111b30;
+    --line:#1e2a44; --line2:#2b3a5c; --txt:#eaf0fb; --muted:#8092b6; --dim:#5a6a8f;
+    --rs:#64748b; --ga:#3b82f6; --cs:#f59e0b; --ok:#2dd4a7; --bad:#fb5a6a;
+    --glow:0 0 0 1px rgba(59,130,246,.25),0 8px 30px -8px rgba(59,130,246,.35);
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0;background:
+    radial-gradient(1100px 600px at 80% -10%,rgba(59,130,246,.10),transparent 60%),
+    radial-gradient(900px 500px at 0% 0%,rgba(245,158,11,.07),transparent 55%),
+    var(--bg);
+    color:var(--txt);font:14px/1.55 "Segoe UI",system-ui,Roboto,sans-serif}
+  a{color:inherit}
+  .shell{max-width:1240px;margin:0 auto;padding:0 22px 60px}
+
+  header{display:flex;align-items:center;gap:16px;padding:22px 2px 20px}
+  .logo{width:42px;height:42px;border-radius:12px;display:grid;place-items:center;
+    background:linear-gradient(135deg,#3b82f6,#8b5cf6);box-shadow:var(--glow);font-size:20px}
+  .brand h1{font-size:19px;margin:0;letter-spacing:.2px;font-weight:700}
+  .brand p{margin:2px 0 0;color:var(--muted);font-size:12.5px}
+  header .spacer{flex:1}
+  .legend{display:flex;gap:14px;align-items:center;font-size:12px;color:var(--muted)}
+  .legend b{display:inline-flex;align-items:center;gap:6px;font-weight:600}
+  .dot{width:9px;height:9px;border-radius:50%}
+  .dot.rs{background:var(--rs)} .dot.ga{background:var(--ga)} .dot.cs{background:var(--cs)}
+
+  .toolbar{display:flex;gap:16px;align-items:flex-end;flex-wrap:wrap;
+    background:linear-gradient(180deg,var(--panel2),var(--panel));
+    border:1px solid var(--line);border-radius:16px;padding:18px 18px;margin-bottom:18px;
+    box-shadow:0 12px 40px -22px #000}
+  .field{display:flex;flex-direction:column;gap:7px}
+  .field label{font-size:11px;text-transform:uppercase;letter-spacing:.08em;color:var(--dim)}
+  select,input[type=number]{appearance:none;background:#0a1120;border:1px solid var(--line2);
+    color:var(--txt);border-radius:10px;padding:10px 12px;font-size:14px;min-width:120px;outline:none}
+  select:focus,input:focus{border-color:var(--ga);box-shadow:0 0 0 3px rgba(59,130,246,.18)}
+  .run-btn{margin-left:auto;background:linear-gradient(135deg,#3b82f6,#6366f1);color:#fff;
+    border:0;border-radius:11px;padding:12px 26px;font-size:14.5px;font-weight:700;cursor:pointer;
+    box-shadow:0 10px 26px -10px rgba(59,130,246,.8);transition:transform .08s,filter .15s}
+  .run-btn:hover{filter:brightness(1.08)} .run-btn:active{transform:translateY(1px)}
+  .run-btn:disabled{opacity:.45;cursor:not-allowed;box-shadow:none}
+
+  .kpis{display:grid;grid-template-columns:repeat(4,1fr);gap:14px;margin-bottom:18px}
+  .kpi{background:linear-gradient(180deg,var(--panel2),var(--panel));border:1px solid var(--line);
+    border-radius:14px;padding:14px 16px;position:relative;overflow:hidden}
+  .kpi .cap{font-size:11px;text-transform:uppercase;letter-spacing:.08em;color:var(--dim)}
+  .kpi .big{font-size:30px;font-weight:800;margin-top:6px;font-variant-numeric:tabular-nums}
+  .kpi .big small{font-size:14px;color:var(--muted);font-weight:600}
+  .kpi.accent:after{content:"";position:absolute;inset:auto -30% -60% auto;width:140px;height:140px;
+    background:radial-gradient(circle,rgba(59,130,246,.35),transparent 60%)}
+
+  .bar-wrap{height:12px;background:#0a1120;border-radius:7px;overflow:hidden;margin-top:10px}
+  .bar-wrap>div{height:100%;width:0;transition:width .25s ease;border-radius:7px}
+
+  .grid{display:grid;grid-template-columns:1fr 1fr;gap:16px}
+  @media(max-width:860px){.grid{grid-template-columns:1fr}.kpis{grid-template-columns:1fr 1fr}}
+  .card{background:linear-gradient(180deg,var(--panel2),var(--panel));border:1px solid var(--line);
+    border-radius:16px;padding:18px;box-shadow:0 12px 40px -26px #000}
+  .card h2{font-size:12px;margin:0 0 16px;color:var(--muted);text-transform:uppercase;letter-spacing:.09em;
+    display:flex;align-items:center;gap:8px}
+  .card h2 .tag{margin-left:auto;font-size:11px;color:var(--dim);text-transform:none;letter-spacing:0}
+
+  .bars{display:flex;flex-direction:column;gap:16px}
+  .brow{display:grid;grid-template-columns:34px 1fr 50px;align-items:center;gap:12px}
+  .brow .nm{font-weight:700;font-size:13px}
+  .nm.rs{color:var(--rs)} .nm.ga{color:var(--ga)} .nm.cs{color:var(--cs)}
+  .track{height:22px;background:#0a1120;border-radius:7px;overflow:hidden;position:relative}
+  .track>div{height:100%;width:0;transition:width .3s cubic-bezier(.2,.8,.2,1);border-radius:7px}
+  .f-rs{background:linear-gradient(90deg,#475569,#64748b)}
+  .f-ga{background:linear-gradient(90deg,#2563eb,#60a5fa)}
+  .f-cs{background:linear-gradient(90deg,#d97706,#fbbf24)}
+  .brow .pc{text-align:right;font-weight:700;font-variant-numeric:tabular-nums;font-size:13px}
+
+  .progress{height:8px;background:#0a1120;border-radius:6px;overflow:hidden}
+  .progress>div{height:100%;width:0;background:linear-gradient(90deg,#3b82f6,#f59e0b);
+    transition:width .15s;box-shadow:0 0 14px rgba(59,130,246,.6)}
+  .pmeta{display:flex;justify-content:space-between;color:var(--muted);font-size:12px;margin-top:8px}
+
+  .log{height:290px;overflow:auto;font:12px/1.6 ui-monospace,"Cascadia Code",Consolas,monospace;
+    background:#070d1a;border:1px solid var(--line);border-radius:12px;padding:12px}
+  .log::-webkit-scrollbar{width:8px}.log::-webkit-scrollbar-thumb{background:var(--line2);border-radius:8px}
+  .ln{padding:2px 0;border-bottom:1px solid rgba(255,255,255,.03);white-space:nowrap}
+  .badge{display:inline-block;min-width:60px;text-align:center;padding:1px 8px;border-radius:6px;
+    font-weight:700;font-size:11px;margin-right:8px}
+  .b-hit{background:rgba(45,212,167,.14);color:var(--ok)}
+  .b-fp{background:rgba(251,90,106,.14);color:var(--bad)}
+  .chip{display:inline-block;padding:0 7px;border-radius:5px;font-weight:700;margin-right:6px}
+  .chip.rs{color:var(--rs)}.chip.ga{color:var(--ga)}.chip.cs{color:var(--cs)}
+  .mut{color:var(--dim)}
+  .pl{color:#9fb3d9}
+
+  table{width:100%;border-collapse:collapse;font-size:12.5px}
+  th,td{text-align:left;padding:9px 10px;border-bottom:1px solid var(--line);white-space:nowrap}
+  th{color:var(--dim);font-weight:600;font-size:11px;text-transform:uppercase;letter-spacing:.06em}
+  tbody tr:hover{background:rgba(59,130,246,.05)}
+  td.win{color:var(--ok);font-weight:700}
+  .pill{display:inline-block;padding:2px 9px;border-radius:999px;font-size:11px;border:1px solid var(--line2);color:var(--muted)}
+  .empty{color:var(--dim);text-align:center;padding:26px;font-size:13px}
+  footer{margin-top:26px;color:var(--dim);font-size:11.5px;text-align:center}
+</style>
+</head>
+<body>
+<div class="shell">
+  <header>
+    <div class="logo">🛡️</div>
+    <div class="brand">
+      <h1>SBVF&nbsp;·&nbsp;Search-Based Vulnerability Framework</h1>
+      <p>Genetic Algorithm vs Cuckoo Search vs Random Search — live detection on the local benchmark</p>
+    </div>
+    <div class="spacer"></div>
+    <div class="legend">
+      <b><span class="dot rs"></span>RS</b>
+      <b><span class="dot ga"></span>GA</b>
+      <b><span class="dot cs"></span>CS</b>
+    </div>
+  </header>
+
+  <div class="toolbar">
+    <div class="field"><label>Dataset split</label>
+      <select id="split">
+        <option value="test" selected>test · held-out</option>
+        <option value="train">train</option>
+        <option value="all">all endpoints</option>
+      </select>
+    </div>
+    <div class="field"><label>Runs / seeds</label>
+      <input id="runs" type="number" value="10" min="1" max="50">
+    </div>
+    <div class="field"><label>Budget · evals</label>
+      <input id="budget" type="number" value="150" min="20" max="1000" step="10">
+    </div>
+    <button class="run-btn" id="go">▶&nbsp;&nbsp;Run simulation</button>
+  </div>
+
+  <div class="kpis">
+    <div class="kpi accent"><div class="cap">Progress</div>
+      <div class="big"><span id="pct">0</span><small>%</small></div></div>
+    <div class="kpi"><div class="cap">Confirmed findings</div>
+      <div class="big" style="color:var(--ok)"><span id="hits">0</span></div></div>
+    <div class="kpi"><div class="cap">False positives</div>
+      <div class="big" style="color:var(--bad)"><span id="fps">0</span></div></div>
+    <div class="kpi"><div class="cap">Runs completed</div>
+      <div class="big"><span id="done">0</span><small>/<span id="tot">0</span></small></div></div>
+  </div>
+
+  <div class="card" style="margin-bottom:16px">
+    <h2>Simulation progress <span class="tag" id="pmsg">Idle — configure and press Run</span></h2>
+    <div class="progress"><div id="pbar"></div></div>
+    <div class="pmeta"><span id="elapsed">—</span><span id="rate"></span></div>
+  </div>
+
+  <div class="grid">
+    <div class="card">
+      <h2>Detection rate · Recall <span class="tag">vulnerable endpoints</span></h2>
+      <div class="bars" id="recall"></div>
+    </div>
+    <div class="card">
+      <h2>False-positive rate <span class="tag">safe endpoints</span></h2>
+      <div class="bars" id="fp"></div>
+    </div>
+  </div>
+
+  <div class="card" style="margin-top:16px">
+    <h2>Live findings stream <span class="tag" id="logcount">0 events</span></h2>
+    <div class="log" id="log"><div class="empty">No findings yet. Press Run to start the search.</div></div>
+  </div>
+
+  <div class="card" style="margin-top:16px">
+    <h2>Efficiency · evals-to-first-detection <span class="tag">Mann-Whitney U · Vargha-Delaney Â12</span></h2>
+    <table id="eff"><thead><tr>
+      <th>Endpoint</th><th>Comparison</th><th>Med A</th><th>Med B</th>
+      <th>p-value</th><th>Â12</th><th>Effect</th><th>Significant</th>
+    </tr></thead><tbody><tr><td colspan="8" class="empty">Runs a full simulation to compute statistics.</td></tr></tbody></table>
+  </div>
+
+  <footer>SBVF research prototype · all targets run on 127.0.0.1 · for academic use only</footer>
+</div>
+
+<script>
+const ALGS=["RS","GA","CS"];
+const el=id=>document.getElementById(id);
+let agg,startedAt,hits,fps,logN;
+
+function reset(){
+  agg={}; for(const a of ALGS) agg[a]={vT:0,vH:0,sT:0,sH:0};
+  hits=0; fps=0; logN=0;
+  el("hits").textContent="0"; el("fps").textContent="0";
+  el("done").textContent="0"; el("pct").textContent="0";
+  el("pbar").style.width="0%"; el("logcount").textContent="0 events";
+  el("log").innerHTML='<div class="empty">Searching…</div>';
+  el("eff").querySelector("tbody").innerHTML='<tr><td colspan="8" class="empty">Running…</td></tr>';
+  drawBars();
+}
+function pctOf(a,k){const t=agg[a][k+"T"],h=agg[a][k+"H"];return t?h/t*100:0;}
+function drawBars(){
+  for(const [box,k] of [["recall","v"],["fp","s"]]){
+    const host=el(box); host.innerHTML="";
+    for(const a of ALGS){
+      const p=pctOf(a,k);
+      const row=document.createElement("div"); row.className="brow";
+      row.innerHTML=`<span class="nm ${a.toLowerCase()}">${a}</span>
+        <span class="track"><div class="f-${a.toLowerCase()}" style="width:${p}%"></div></span>
+        <span class="pc">${p.toFixed(0)}%</span>`;
+      host.appendChild(row);
+    }
+  }
+}
+function esc(s){return (s||"").replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));}
+function logLine(rec){
+  if(!rec.confirmed) { if(rec.label==="safe"){} else return; }
+  const log=el("log");
+  if(logN===0) log.innerHTML="";
+  const atBottom=log.scrollTop+log.clientHeight>=log.scrollHeight-24;
+  const vuln=rec.label==="vulnerable";
+  const ln=document.createElement("div"); ln.className="ln";
+  const alg=`<span class="chip ${rec.algorithm.toLowerCase()}">${rec.algorithm}</span>`;
+  if(vuln && rec.confirmed){
+    ln.innerHTML=`<span class="badge b-hit">HIT</span>${alg}`+
+      `${esc(rec.app)}${esc(rec.endpoint)} <span class="mut">· ${rec.evals_to_first} evals ·</span> `+
+      `<span class="pl">${esc(rec.best_payload).slice(0,64)}</span>`;
+  } else {
+    ln.innerHTML=`<span class="badge b-fp">FALSE+</span>${alg}${esc(rec.app)}${esc(rec.endpoint)}`;
+  }
+  log.appendChild(ln); logN++;
+  el("logcount").textContent=logN+" events";
+  if(atBottom) log.scrollTop=log.scrollHeight;
+}
+
+let es,timer;
+el("go").onclick=()=>{
+  if(es) es.close();
+  reset();
+  const split=el("split").value, runs=el("runs").value, budget=el("budget").value;
+  el("go").disabled=true; el("pmsg").textContent="Starting…";
+  startedAt=Date.now();
+  clearInterval(timer);
+  timer=setInterval(()=>{el("elapsed").textContent=((Date.now()-startedAt)/1000).toFixed(1)+"s elapsed";},100);
+  es=new EventSource(`/api/run?split=${split}&runs=${runs}&budget=${budget}`);
+
+  es.addEventListener("start",e=>{
+    const d=JSON.parse(e.data); el("tot").textContent=d.total;
+    el("pmsg").textContent=`${d.endpoints} endpoints × 3 algorithms × ${d.runs} seeds · budget ${d.budget}`;
+  });
+  es.addEventListener("run",e=>{
+    const d=JSON.parse(e.data),rec=d.rec;
+    const k=rec.label==="vulnerable"?"v":"s";
+    agg[rec.algorithm][k+"T"]++;
+    if(rec.confirmed){agg[rec.algorithm][k+"H"]++; if(k==="v"){hits++;el("hits").textContent=hits;} else {fps++;el("fps").textContent=fps;}}
+    const pct=Math.round(d.i/d.total*100);
+    el("pbar").style.width=pct+"%"; el("pct").textContent=pct; el("done").textContent=d.i;
+    el("rate").textContent=(d.i/((Date.now()-startedAt)/1000)).toFixed(0)+" runs/s";
+    if(d.i%3===0||d.i===d.total) drawBars();
+    logLine(rec);
+  });
+  es.addEventListener("done",e=>{
+    const rep=JSON.parse(e.data); drawBars();
+    const tb=el("eff").querySelector("tbody"); tb.innerHTML="";
+    if(!rep.efficiency_tests.length){tb.innerHTML='<tr><td colspan="8" class="empty">No endpoint was detected by multiple algorithms for a pairwise test.</td></tr>';}
+    for(const t of rep.efficiency_tests){
+      const tr=document.createElement("tr");
+      tr.innerHTML=`<td>${t.endpoint}</td><td>${t.compare}</td><td>${t.median_a}</td><td>${t.median_b}</td>
+        <td>${t.p_value}</td><td>${t.a12}</td><td><span class="pill">${t.effect}</span></td>
+        <td class="${t.significant?'win':''}">${t.significant?'yes · p<0.05':'no'}</td>`;
+      tb.appendChild(tr);
+    }
+    el("pmsg").textContent="Completed"; el("go").disabled=false;
+    clearInterval(timer); es.close();
+  });
+  es.onerror=()=>{el("pmsg").textContent="Stream ended"; el("go").disabled=false; clearInterval(timer); if(es) es.close();};
+};
+reset();
+</script>
+</body>
+</html>
