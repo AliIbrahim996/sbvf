@@ -16,6 +16,7 @@ APPS = {
     "blog": ("testbed.apps.blog", 8014),
     "shop": ("testbed.apps.shop", 8015),
     "wafapp": ("testbed.apps.wafapp", 8016),
+    "authapp": ("testbed.apps.authapp", 8017),
 }
 
 
