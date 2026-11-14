@@ -28,7 +28,8 @@ class Resp:
 
 
 class Target:
-    def __init__(self, base_url: str, allow_remote: bool = False, timeout: float = 5.0):
+    def __init__(self, base_url: str, allow_remote: bool = False, timeout: float = 5.0,
+                 cookies: dict | None = None):
         host = urllib.parse.urlparse(base_url).hostname or ""
         if host not in LOCAL_HOSTS and not allow_remote:
             raise ValueError(
@@ -37,7 +38,13 @@ class Target:
                 f"you have explicit authorization to test.")
         self.base = base_url.rstrip("/")
         self.timeout = timeout
+        self.cookies = cookies or {}   # session cookies for authenticated real apps
         self.requests = 0  # evaluation counter
+
+    def _cookie_header(self) -> dict:
+        if not self.cookies:
+            return {}
+        return {"Cookie": "; ".join(f"{k}={v}" for k, v in self.cookies.items())}
 
     def get(self, path: str, params: dict | None = None) -> Resp:
         url = self.base + path
@@ -45,8 +52,9 @@ class Target:
             url += "?" + urllib.parse.urlencode(params)
         self.requests += 1
         t0 = time.perf_counter()
+        req = urllib.request.Request(url, headers=self._cookie_header())
         try:
-            with urllib.request.urlopen(url, timeout=self.timeout) as r:
+            with urllib.request.urlopen(req, timeout=self.timeout) as r:
                 body = r.read().decode("utf-8", "replace")
                 return Resp(r.status, body, dict(r.headers), time.perf_counter() - t0)
         except urllib.error.HTTPError as e:
