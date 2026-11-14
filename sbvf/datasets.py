@@ -52,6 +52,15 @@ ALL = [
     Endpoint("/xss_hard", "q", "xss", "vulnerable", "wafapp"),
     Endpoint("/sqli_hard", "sku", "sqli", "vulnerable", "wafapp"),
     Endpoint("/xss_safe_hard", "q", "xss", "safe", "wafapp"),
+    # --- access-control app "authapp" (IDOR + RBAC) ---
+    Endpoint("/idor/account", "id", "idor", "vulnerable", "authapp"),
+    Endpoint("/idor/doc", "id", "idor", "vulnerable", "authapp"),
+    Endpoint("/idor/account_safe", "id", "idor", "safe", "authapp"),
+    Endpoint("/idor/doc_safe", "id", "idor", "safe", "authapp"),
+    Endpoint("/rbac/admin", None, "rbac", "vulnerable", "authapp"),
+    Endpoint("/rbac/dashboard", None, "rbac", "vulnerable", "authapp"),
+    Endpoint("/rbac/admin_safe", None, "rbac", "safe", "authapp"),
+    Endpoint("/rbac/report_safe", None, "rbac", "safe", "authapp"),
 ]
 
 
