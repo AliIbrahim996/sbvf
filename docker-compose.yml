@@ -1,0 +1,26 @@
+# SBVF benchmark + optional DVWA training target.
+#
+#   docker compose up sbvf        -> dashboard at http://localhost:8080
+#   docker compose --profile labs up   -> also starts DVWA at http://localhost:8081
+#
+# DVWA is a well-known deliberately-vulnerable training app, used here only as an
+# extra local practice target. It is NOT pointed at by the framework automatically
+# (the framework is restricted to its own 127.0.0.1 benchmark apps); run manual
+# experiments against it with --allow-remote only on your own machine.
+
+services:
+  sbvf:
+    build: .
+    image: sbvf:latest
+    ports:
+      - "8080:8080"
+    environment:
+      SBVF_UI_HOST: "0.0.0.0"
+    restart: unless-stopped
+
+  dvwa:
+    image: vulnerables/web-dvwa:latest
+    profiles: ["labs"]
+    ports:
+      - "8081:80"
+    restart: unless-stopped
