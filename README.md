@@ -41,6 +41,24 @@ Run the test suite:
 python -m tests.test_framework
 ```
 
+## Scanning a real open-source app
+
+Point the framework at a real, locally-run open-source application (authorized local
+testing only). It clones/downloads the project, launches it with the start command you
+provide, crawls and tests it, then removes the clone:
+
+```bash
+python -m sbvf.scan_repo \
+  --repo https://github.com/stamparm/DSVW \
+  --start "python dsvw.py" \
+  --base http://127.0.0.1:65412 \
+  --endpoints /:id:sqli /:v:xss \
+  --runs 15 --budget 60
+```
+
+The framework only talks to a local base URL; `--allow-remote` is required for anything
+else and is intended solely for a local lab instance you are authorized to test.
+
 ## Docker
 
 ```bash
