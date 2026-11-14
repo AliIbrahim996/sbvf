@@ -151,8 +151,31 @@ def cuckoo_search(oracle, budget: int, seed: int, *, nests=12, pa=0.25) -> Searc
     return _result("CS", b)
 
 
+def static_scanner(oracle, budget: int, seed: int = 0) -> SearchResult:
+    """Baseline representing a conventional scanner: a fixed, deterministic payload
+    list tried in a set order (transform = none), with no search and no feedback.
+
+    This is the "other approaches" comparator -- the fixed-payload style of studies
+    such as [3] and [4]. It is seed-independent.
+    """
+    from .individual import GRAMMARS, Individual
+    b = _Budget(oracle, budget)
+    g = GRAMMARS[oracle.vuln]
+    for pr in range(len(g["pre"])):
+        for co in range(len(g["core"])):
+            for po in range(len(g["post"])):
+                if not b.ok():
+                    return _result("Static", b)
+                b.assess(Individual(oracle.vuln, [pr, co, po, 0]))
+    return _result("Static", b)
+
+
+# The three search algorithms compared head-to-head (used by the live UI).
 ALGORITHMS = {
     "RS": random_search,
     "GA": genetic_algorithm,
     "CS": cuckoo_search,
 }
+
+# All methods including the conventional-scanner baseline (used by the budget sweep).
+ALL_METHODS = {**ALGORITHMS, "Static": static_scanner}

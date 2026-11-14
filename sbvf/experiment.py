@@ -21,7 +21,7 @@ import json
 import os
 import sys
 
-from .algorithms import ALGORITHMS
+from .algorithms import ALGORITHMS, ALL_METHODS
 from .oracles import Oracle, Target
 from . import datasets, stats
 
@@ -105,6 +105,52 @@ def analyze(rows):
     return report
 
 
+def budget_sweep(endpoints, base_urls, budgets, runs, out_dir, methods=None,
+                 allow_remote=False):
+    """Recall as a function of evaluation budget, per method, across seeds.
+
+    This is the informative view: at small budgets recall is well below 100% and the
+    methods separate; raising the budget lets every method saturate. It directly
+    answers "is a flat 100% just overfitting?" -- no, it is budget saturation, and the
+    curve below saturation is where the real differences live.
+
+    The Static baseline is deterministic, so it is run once per budget (seed ignored).
+    """
+    methods = methods or ALL_METHODS
+    vuln = [e for e in endpoints if e.label == "vulnerable"]
+    rows = []
+    for e in vuln:
+        for name, method in methods.items():
+            seeds = [0] if name == "Static" else range(runs)
+            for budget in budgets:
+                for seed in seeds:
+                    t = Target(base_urls[e.app], allow_remote=allow_remote)
+                    o = Oracle(t, e.path, e.param, e.vuln)
+                    r = method(o, budget, seed)
+                    rows.append({"endpoint": e.path, "vuln": e.vuln, "method": name,
+                                 "budget": budget, "seed": seed,
+                                 "confirmed": int(r.confirmed),
+                                 "evals_to_first": r.evals_to_first or ""})
+    os.makedirs(out_dir, exist_ok=True)
+    _write_csv(rows, os.path.join(out_dir, "sweep.csv"))
+
+    # recall[method][budget] = detected vulnerable runs / total
+    curve = {}
+    for name in methods:
+        curve[name] = {}
+        for budget in budgets:
+            sub = [r for r in rows if r["method"] == name and r["budget"] == budget]
+            curve[name][budget] = round(sum(r["confirmed"] for r in sub) / len(sub), 3) if sub else 0.0
+    with open(os.path.join(out_dir, "sweep.json"), "w", encoding="utf-8") as f:
+        json.dump({"budgets": budgets, "recall_by_method": curve}, f, indent=2)
+
+    print("\n=== Recall vs budget (detection rate on vulnerable endpoints) ===")
+    print("budget   " + "".join(f"{m:>9}" for m in methods))
+    for budget in budgets:
+        print(f"{budget:>6}   " + "".join(f"{curve[m][budget]:>8.0%} " for m in methods))
+    return curve
+
+
 def _print_summary(report):
     print("\n=== Detection rate (Recall) on vulnerable endpoints ===")
     for alg, v in report["detection_on_vulnerable"].items():
@@ -132,13 +178,19 @@ def main(argv=None):
     ap.add_argument("--runs", type=int, default=30)
     ap.add_argument("--budget", type=int, default=200)
     ap.add_argument("--out", default="results")
+    ap.add_argument("--sweep", help="comma-separated budgets, e.g. 10,25,50,100,200")
     args = ap.parse_args(argv)
 
     endpoints = SPLITS[args.split]()
     servers, base_urls = start_all()
     try:
-        run_suite(endpoints, base_urls, args.runs, args.budget,
-                  os.path.join(args.out, args.split))
+        if args.sweep:
+            budgets = [int(x) for x in args.sweep.split(",")]
+            budget_sweep(endpoints, base_urls, budgets, args.runs,
+                         os.path.join(args.out, args.split + "_sweep"))
+        else:
+            run_suite(endpoints, base_urls, args.runs, args.budget,
+                      os.path.join(args.out, args.split))
     finally:
         stop_all(servers)
 
