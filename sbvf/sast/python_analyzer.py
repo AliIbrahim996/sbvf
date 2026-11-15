@@ -93,12 +93,8 @@ def _const_str(node) -> Optional[str]:
 
 
 def _subscript_key(node: ast.Subscript):
-    """The subscript expression, unwrapping ast.Index on Python <= 3.8."""
-    s = node.slice
-    index_cls = getattr(ast, "Index", None)
-    if index_cls is not None and isinstance(s, index_cls):
-        s = s.value
-    return s
+    """The subscript expression (Python 3.9+ stores it directly in ``slice``)."""
+    return node.slice
 
 
 def route_path_params(template: str) -> List[str]:

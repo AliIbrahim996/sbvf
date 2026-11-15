@@ -114,6 +114,7 @@ class TestIntegration(unittest.TestCase):
     @classmethod
     def tearDownClass(cls):
         cls.srv.shutdown()
+        cls.srv.server_close()
 
     def test_target_rejects_remote(self):
         with self.assertRaises(ValueError):
@@ -163,6 +164,7 @@ class TestAccessControl(unittest.TestCase):
     @classmethod
     def tearDownClass(cls):
         cls.srv.shutdown()
+        cls.srv.server_close()
 
     def test_idor_vulnerable_detected(self):
         o = Oracle(Target(self.base), "/idor/account", "id", "idor")

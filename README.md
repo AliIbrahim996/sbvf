@@ -16,7 +16,10 @@ The bundled apps are intentionally vulnerable and are for academic use only.
 
 ## Requirements
 
-- Python 3.12 (standard library only for the core; **no pip install needed**).
+- **Python 3.12 or newer** (standard library only for the core; **no pip install needed**).
+  The framework refuses to start on older interpreters. On Windows, if `python`
+  points to an older version, use the launcher: `py -3.12 -m ui.server`,
+  `py -3.12 -m tests.test_sast`, etc.
 - Optional: `selenium` for real-browser confirmation of XSS/Clickjacking.
 - Optional: Docker, to run the dashboard and the DVWA practice lab.
 

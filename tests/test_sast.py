@@ -237,6 +237,7 @@ class TestGuidedDynamicConfirmation(unittest.TestCase):
     @classmethod
     def tearDownClass(cls):
         cls.srv.shutdown()
+        cls.srv.server_close()
 
     def test_sast_finding_is_dynamically_confirmed(self):
         # A static finding at xss/reflect_raw.php?q=  (file path -> route).
@@ -374,6 +375,7 @@ class TestGuidedPythonConfirmation(unittest.TestCase):
     @classmethod
     def tearDownClass(cls):
         cls.srv.shutdown()
+        cls.srv.server_close()
 
     def _confirm(self, files, algo):
         with _project(files) as root:
