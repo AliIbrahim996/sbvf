@@ -93,12 +93,13 @@ class PhpAnalyzer:
         while changed and guard < 20:
             changed, guard = False, guard + 1
             for line, stmt in statements:
-                m = re.match(r"\s*(\$\w+)\s*(?:\.?=)\s*(.+)", stmt)
-                if not m or stmt.lstrip().startswith("=="):
+                # Match a real assignment ($var = ... or $var .= ...), but NOT a
+                # comparison: the (?!=) lookahead rejects == / === / etc. so a
+                # statement like `$x == $_GET['y'];` is not mistaken for `$x = ...`.
+                m = re.match(r"\s*(\$\w+)\s*\.?=(?!=)\s*(.+)", stmt)
+                if not m:
                     continue
                 var, rhs = m.group(1), m.group(2)
-                if "==" in stmt.split("=", 1)[0]:
-                    continue
                 src = self._taint_in(rhs, tainted)
                 if src and var not in tainted:
                     tainted[var] = src
@@ -144,10 +145,16 @@ class PhpAnalyzer:
         return None
 
     def _is_sanitized(self, text: str, token: str) -> bool:
-        """True if a sanitizer (cast or wrapping call) neutralises the taint."""
-        # A numeric/boolean cast anywhere in the expression sanitizes it.
-        if CAST_SAN.search(text):
-            return True
+        """True if a sanitizer (cast or wrapping call) neutralises *token*.
+
+        The cast/sanitizer must apply to *this* token, not merely appear
+        somewhere in the statement: ``(int)$id . $_GET['x']`` sanitizes ``$id``
+        but leaves ``$_GET['x']`` tainted.
+        """
+        # A numeric/boolean cast directly applied to the token, e.g. (int) $x.
+        for cm in CAST_SAN.finditer(text):
+            if re.match(r"\s*" + re.escape(token) + r"\b", text[cm.end():]):
+                return True
         # A function-style sanitizer whose balanced-paren region covers the token.
         for sm in SANITIZER_FUNCS.finditer(text):
             open_idx = text.find("(", sm.start())
