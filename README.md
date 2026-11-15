@@ -92,6 +92,30 @@ Every step streams into the dashboard's **Static analysis** tab
 (`python -m ui.server`, then the 🧬 tab). Six intentionally-vulnerable sample
 projects live under `testbed/sast_samples/` (one per stack).
 
+### Static-guided search (run the algorithm on a real codebase)
+
+The static analyzer can **drive the search** instead of being a separate tool:
+it taint-analyzes the source to discover injection points automatically, then
+GA/CS/RS confirm which are actually exploitable against the running app — so you
+never hand-write `--endpoints`.
+
+```bash
+python -m sbvf.scan_repo \
+  --repo https://github.com/<user>/<php-app> \
+  --start "php -S 127.0.0.1:8000" \
+  --base http://127.0.0.1:8000 \
+  --from-sast --web-root public \
+  --runs 15 --budget 60
+```
+
+Pipeline: **static taint analysis → candidate endpoints → GA/CS/RS confirmation.**
+The static pass recovers the request parameter and method behind each finding;
+`sbvf/sast/bridge.py` maps GET-reachable, file-routed **native-PHP** `xss`/`sqli`
+findings to targets and reports the rest as *static-only* (framework route tables
+are not file-based, so they are not auto-confirmed). This gives a precision
+figure — how many statically-reported points the search proves exploitable — and
+runs the algorithm on real open-source code, not just the benchmark apps.
+
 ## Docker
 
 ```bash
