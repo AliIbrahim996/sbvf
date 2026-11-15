@@ -103,6 +103,32 @@
   .pill{display:inline-block;padding:2px 9px;border-radius:999px;font-size:11px;border:1px solid var(--line2);color:var(--muted)}
   .empty{color:var(--dim);text-align:center;padding:26px;font-size:13px}
   footer{margin-top:26px;color:var(--dim);font-size:11.5px;text-align:center}
+
+  /* tabs */
+  .tabs{display:flex;gap:8px;margin:6px 2px 18px}
+  .tab{background:var(--panel);border:1px solid var(--line);color:var(--muted);
+    padding:10px 20px;border-radius:11px;font-size:13.5px;font-weight:600;cursor:pointer;
+    transition:.15s;display:flex;align-items:center;gap:8px}
+  .tab:hover{color:var(--txt);border-color:var(--line2)}
+  .tab.active{background:linear-gradient(135deg,#3b82f6,#6366f1);color:#fff;border-color:transparent;
+    box-shadow:0 8px 22px -12px rgba(59,130,246,.9)}
+  section[hidden]{display:none}
+
+  /* severity badges + code */
+  .sev{display:inline-block;min-width:62px;text-align:center;padding:2px 9px;border-radius:6px;
+    font-weight:700;font-size:11px;letter-spacing:.03em}
+  .sev-high{background:rgba(251,90,106,.16);color:var(--bad)}
+  .sev-medium{background:rgba(245,158,11,.16);color:var(--cs)}
+  .sev-low{background:rgba(100,116,139,.18);color:var(--muted)}
+  code.loc{color:#9fb3d9;font:12px ui-monospace,Consolas,monospace}
+  .snip{font:11.5px/1.5 ui-monospace,Consolas,monospace;color:#c3d0ea;background:#070d1a;
+    border-radius:6px;padding:2px 7px;display:inline-block;max-width:340px;overflow:hidden;
+    text-overflow:ellipsis;white-space:nowrap;vertical-align:middle}
+  .b-detect{background:rgba(59,130,246,.14);color:var(--ga)}
+  .b-file{background:rgba(100,116,139,.16);color:var(--muted)}
+  .b-src{background:rgba(245,158,11,.14);color:var(--cs)}
+  .b-find{background:rgba(251,90,106,.16);color:var(--bad)}
+  .b-sum{background:rgba(45,212,167,.14);color:var(--ok)}
 </style>
 </head>
 <body>
@@ -121,6 +147,12 @@
     </div>
   </header>
 
+  <div class="tabs">
+    <button class="tab active" id="tab-dynamic" onclick="showView('dynamic')">🔎 Dynamic search</button>
+    <button class="tab" id="tab-sast" onclick="showView('sast')">🧬 Static analysis (SAST)</button>
+  </div>
+
+  <section id="view-dynamic">
   <div class="toolbar">
     <div class="field"><label>Dataset split</label>
       <select id="split">
@@ -184,6 +216,51 @@
       <th>p-value</th><th>Â12</th><th>Effect</th><th>Significant</th>
     </tr></thead><tbody><tr><td colspan="8" class="empty">Runs a full simulation to compute statistics.</td></tr></tbody></table>
   </div>
+  </section>
+
+  <section id="view-sast" hidden>
+    <div class="toolbar">
+      <div class="field"><label>Sample project</label>
+        <select id="sample">
+          <option value="php_native">PHP · native</option>
+          <option value="php_yii">PHP · Yii</option>
+          <option value="php_laravel">PHP · Laravel</option>
+          <option value="python_native">Python · native</option>
+          <option value="python_fastapi">Python · FastAPI</option>
+          <option value="python_django">Python · Django</option>
+        </select>
+      </div>
+      <div class="field" style="flex:1;min-width:220px"><label>…or a local path to scan</label>
+        <input id="scanpath" type="text" placeholder="e.g. C:\path\to\project (overrides sample)"
+               style="min-width:100%">
+      </div>
+      <button class="run-btn" id="scan">▶&nbsp;&nbsp;Scan code</button>
+    </div>
+
+    <div class="kpis">
+      <div class="kpi accent"><div class="cap">Files scanned</div>
+        <div class="big"><span id="s-files">0</span></div></div>
+      <div class="kpi"><div class="cap">Findings</div>
+        <div class="big" style="color:var(--bad)"><span id="s-total">0</span></div></div>
+      <div class="kpi"><div class="cap">High severity</div>
+        <div class="big" style="color:var(--bad)"><span id="s-high">0</span></div></div>
+      <div class="kpi"><div class="cap">Detected stack</div>
+        <div class="big" style="font-size:17px;padding-top:12px"><span id="s-fw">—</span></div></div>
+    </div>
+
+    <div class="card" style="margin-bottom:16px">
+      <h2>Analysis steps <span class="tag" id="s-msg">Idle — choose a project and press Scan</span></h2>
+      <div class="log" id="slog"><div class="empty">The analyzer streams every step: detect → walk files → taint sources → findings.</div></div>
+    </div>
+
+    <div class="card">
+      <h2>Findings <span class="tag" id="s-count">0 vulnerabilities</span></h2>
+      <table id="findings"><thead><tr>
+        <th>Severity</th><th>Vulnerability</th><th>CWE</th><th>Location</th>
+        <th>Source → Sink</th><th>Code</th>
+      </tr></thead><tbody><tr><td colspan="6" class="empty">No scan yet. Press Scan to analyze the source code.</td></tr></tbody></table>
+    </div>
+  </section>
 
   <footer>SBVF research prototype · all targets run on 127.0.0.1 · for academic use only</footer>
 </div>
@@ -281,6 +358,82 @@ el("go").onclick=()=>{
   es.onerror=()=>{el("pmsg").textContent="Stream ended"; el("go").disabled=false; clearInterval(timer); if(es) es.close();};
 };
 reset();
+
+/* ---------------- Static analysis (SAST) view ---------------- */
+function showView(v){
+  el("view-dynamic").hidden = v!=="dynamic";
+  el("view-sast").hidden    = v!=="sast";
+  el("tab-dynamic").classList.toggle("active", v==="dynamic");
+  el("tab-sast").classList.toggle("active", v==="sast");
+}
+const VTITLE={sqli:"SQL Injection",xss:"Cross-Site Scripting",command_injection:"Command Injection",
+  code_injection:"Code Injection",file_inclusion:"File Inclusion",path_traversal:"Path Traversal",
+  open_redirect:"Open Redirect",ssrf:"SSRF"};
+let ses, sFindings;
+function slog(kind,text){
+  const log=el("slog");
+  if(log.querySelector(".empty")) log.innerHTML="";
+  const atBottom=log.scrollTop+log.clientHeight>=log.scrollHeight-24;
+  const map={detect:"b-detect",file:"b-file",source:"b-src",finding:"b-find",summary:"b-sum"};
+  const lbl={detect:"DETECT",file:"FILE",source:"SOURCE",finding:"FINDING",summary:"DONE"};
+  const ln=document.createElement("div"); ln.className="ln";
+  ln.innerHTML=`<span class="badge ${map[kind]||'b-file'}">${lbl[kind]||kind}</span>`+
+    `<span class="pl">${esc(text)}</span>`;
+  log.appendChild(ln);
+  if(atBottom) log.scrollTop=log.scrollHeight;
+}
+function renderFindings(list){
+  const tb=el("findings").querySelector("tbody"); tb.innerHTML="";
+  if(!list.length){tb.innerHTML='<tr><td colspan="6" class="empty">No vulnerabilities found. ✓</td></tr>';return;}
+  for(const f of list){
+    const tr=document.createElement("tr");
+    tr.innerHTML=`<td><span class="sev sev-${f.severity}">${f.severity.toUpperCase()}</span></td>
+      <td>${VTITLE[f.vuln]||f.vuln}</td>
+      <td><span class="pill">${f.cwe}</span></td>
+      <td><code class="loc">${esc(f.location)}</code></td>
+      <td><span class="mut">${esc(f.source)}</span> → <b>${esc(f.sink)}</b></td>
+      <td><span class="snip">${esc((f.code||'').trim())}</span></td>`;
+    tb.appendChild(tr);
+  }
+}
+el("scan").onclick=()=>{
+  if(ses) ses.close();
+  sFindings=[];
+  el("slog").innerHTML=""; el("s-files").textContent="0"; el("s-total").textContent="0";
+  el("s-high").textContent="0"; el("s-fw").textContent="…"; el("s-count").textContent="scanning…";
+  renderFindings([]);
+  el("scan").disabled=true; el("s-msg").textContent="Scanning…";
+  const sample=el("sample").value, path=el("scanpath").value.trim();
+  const q=path?`path=${encodeURIComponent(path)}`:`sample=${sample}`;
+  ses=new EventSource(`/api/scan?${q}`);
+  ses.addEventListener("scan_step",e=>{
+    const d=JSON.parse(e.data);
+    slog(d.kind,d.text);
+    if(d.kind==="detect"&&d.data&&d.data.frameworks){
+      el("s-fw").textContent=Object.values(d.data.frameworks).filter(Boolean).join(", ")||"none";
+      if(d.data.file_count!=null) el("s-files").textContent=d.data.file_count;
+    }
+    if(d.kind==="finding"&&d.data&&d.data.finding){
+      sFindings.push(d.data.finding);
+      el("s-total").textContent=sFindings.length;
+      el("s-high").textContent=sFindings.filter(x=>x.severity==="high").length;
+    }
+  });
+  ses.addEventListener("scan_done",e=>{
+    const r=JSON.parse(e.data);
+    el("s-files").textContent=r.files_scanned;
+    renderFindings(r.findings);
+    el("s-total").textContent=r.findings.length;
+    el("s-high").textContent=(r.counts.by_severity.high||0);
+    el("s-count").textContent=r.findings.length+" vulnerabilities";
+    el("s-msg").textContent="Completed"; el("scan").disabled=false; ses.close();
+  });
+  ses.addEventListener("scan_error",e=>{
+    const d=JSON.parse(e.data); slog("finding","ERROR: "+d.message);
+    el("s-msg").textContent="Error"; el("scan").disabled=false; ses.close();
+  });
+  ses.onerror=()=>{el("s-msg").textContent="Stream ended"; el("scan").disabled=false; if(ses) ses.close();};
+};
 </script>
 </body>
 </html>

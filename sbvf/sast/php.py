@@ -277,13 +277,24 @@ class PhpAnalyzer:
         line = 1
         buf = []
         start_line = 1
+        started = False      # True once the current statement has a non-space char
         in_php = False
 
         def flush():
+            nonlocal started
             text = "".join(buf).strip()
             if text:
                 out.append((start_line, text))
             buf.clear()
+            started = False
+
+        def mark():
+            # Anchor the statement's line to its first meaningful character,
+            # so the number is not left on the previous statement's terminator.
+            nonlocal start_line, started
+            if not started:
+                start_line = line
+                started = True
 
         while i < n:
             ch = src[i]
@@ -295,20 +306,18 @@ class PhpAnalyzer:
                 if three == "<?=":
                     in_php = True
                     flush()
-                    start_line = line
                     buf.append("echo ")
+                    mark()
                     i += 3
                     continue
                 if src[i:i + 5].lower() == "<?php":
                     in_php = True
                     flush()
-                    start_line = line
                     i += 5
                     continue
                 if two == "<?":
                     in_php = True
                     flush()
-                    start_line = line
                     i += 2
                     continue
                 if ch == "\n":
@@ -336,6 +345,7 @@ class PhpAnalyzer:
                 continue
             if ch in "'\"":
                 quote = ch
+                mark()
                 buf.append(ch)
                 i += 1
                 while i < n and src[i] != quote:
@@ -356,6 +366,7 @@ class PhpAnalyzer:
                 m = re.match(r"<<<\s*(['\"]?)(\w+)\1", src[i:])
                 if m:
                     label = m.group(2)
+                    mark()
                     buf.append(src[i:i + m.end()])
                     i += m.end()
                     end_rx = re.compile(r"^\s*" + re.escape(label) + r"\b", re.M)
@@ -368,11 +379,12 @@ class PhpAnalyzer:
                     continue
             if ch in ";{}":
                 flush()
-                start_line = line
                 i += 1
                 continue
             if ch == "\n":
                 line += 1
+            if not ch.isspace():
+                mark()
             buf.append(ch)
             i += 1
 

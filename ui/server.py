@@ -14,11 +14,24 @@ import sys
 import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, ROOT)
 
 from sbvf import datasets                    # noqa: E402
 from sbvf.experiment import iter_runs, analyze, SPLITS  # noqa: E402
+from sbvf.sast import scan_path              # noqa: E402
 from testbed.launcher import start_all       # noqa: E402
+
+# Bundled intentionally-vulnerable sample projects for the static analyzer.
+SAST_SAMPLES = {
+    "php_native":   "PHP (native)",
+    "php_yii":      "PHP (Yii)",
+    "php_laravel":  "PHP (Laravel)",
+    "python_native": "Python (native)",
+    "python_fastapi": "Python (FastAPI)",
+    "python_django": "Python (Django)",
+}
+SAST_DIR = os.path.join(ROOT, "testbed", "sast_samples")
 
 # Bind host is configurable so the UI can be exposed from inside a container
 # (set SBVF_UI_HOST=0.0.0.0). The benchmark apps always stay on 127.0.0.1.
@@ -48,6 +61,9 @@ class UIHandler(BaseHTTPRequestHandler):
         if parsed.path == "/api/run":
             return self._stream(urllib.parse.parse_qs(parsed.query))
 
+        if parsed.path == "/api/scan":
+            return self._scan_stream(urllib.parse.parse_qs(parsed.query))
+
         self.send_response(404)
         self.end_headers()
 
@@ -55,6 +71,42 @@ class UIHandler(BaseHTTPRequestHandler):
         payload = f"event: {event}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
         self.wfile.write(payload.encode("utf-8"))
         self.wfile.flush()
+
+    def _scan_stream(self, qs):
+        """Server-Sent Events stream for a static (SAST) source-code scan.
+
+        A ``sample`` key selects a bundled vulnerable project; a ``path`` resolves
+        to any existing local directory (this is a localhost-only research tool).
+        """
+        sample = qs.get("sample", [""])[0]
+        custom = qs.get("path", [""])[0]
+        if sample in SAST_SAMPLES:
+            target = os.path.join(SAST_DIR, sample)
+        elif custom:
+            target = os.path.abspath(custom)
+        else:
+            target = os.path.join(SAST_DIR, "php_native")
+
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream")
+        self.send_header("Cache-Control", "no-cache")
+        self.send_header("Connection", "keep-alive")
+        self.end_headers()
+
+        if not os.path.exists(target):
+            self._sse("scan_error", {"message": f"path not found: {target}"})
+            return
+
+        def on_step(step):
+            self._sse("scan_step", {"kind": step.kind, "text": step.text,
+                                    "data": step.data})
+        try:
+            result = scan_path(target, on_step=on_step)
+            self._sse("scan_done", result)
+        except (BrokenPipeError, ConnectionResetError):
+            pass
+        except Exception as exc:  # surface analyzer errors to the dashboard
+            self._sse("scan_error", {"message": str(exc)})
 
     def _stream(self, qs):
         split = qs.get("split", ["all"])[0]
