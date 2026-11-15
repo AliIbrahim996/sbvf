@@ -14,7 +14,7 @@ import json
 import os
 import shutil
 import subprocess
-from typing import List, Optional, Tuple
+from typing import Optional, Tuple
 
 
 def _npm() -> Optional[str]:
