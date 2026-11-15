@@ -70,6 +70,28 @@ python -m sbvf.integrations --app all --runs 15 --budget 60
 and targets Juice Shop's SQL-injectable product-search API. Observed result: the search
 methods find the flaws in ~2 evaluations versus ~9–10 for the fixed-list Static baseline.
 
+## Static source-code analysis (SAST)
+
+Besides the dynamic, black-box search, SBVF ships a **static** analyzer that reads
+a project's *source code*, detects the language and web framework, taint-tracks
+untrusted user input from sources to dangerous sinks, and reports findings with
+`file:line` precision. It never runs or contacts the application.
+
+Supported stacks: **PHP** (native, Yii, Laravel) and **Python** (native, FastAPI,
+Django). Detected classes include SQL injection, XSS, command/code injection,
+file inclusion, path traversal and open redirect (each mapped to a CWE).
+
+```bash
+# scan a bundled sample, a local project, or clone-scan-remove a repo
+python -m sbvf.scan_code testbed/sast_samples/php_laravel
+python -m sbvf.scan_code path/to/project --json report.json
+python -m sbvf.scan_code --repo https://github.com/user/project
+```
+
+Every step streams into the dashboard's **Static analysis** tab
+(`python -m ui.server`, then the 🧬 tab). Six intentionally-vulnerable sample
+projects live under `testbed/sast_samples/` (one per stack).
+
 ## Docker
 
 ```bash
@@ -81,9 +103,11 @@ docker compose --profile labs up       # also starts DVWA at http://localhost:80
 
 ```
 sbvf/        framework: individual, fitness, oracles, algorithms, stats, datasets, experiment
-testbed/     intentionally-vulnerable apps (bank, blog, shop, wafapp) + launcher
-ui/          real-time dashboard (SSE server + HTML)
-tests/       unit + integration tests
+sbvf/sast/   static analyzer: model, detect, php, python_analyzer, engine
+testbed/     intentionally-vulnerable apps (bank, blog, shop, wafapp, authapp) + launcher
+testbed/sast_samples/  vulnerable source projects for the static analyzer (6 stacks)
+ui/          real-time dashboard (SSE server + HTML; dynamic + static tabs)
+tests/       unit + integration tests (dynamic + static)
 docs/        thesis chapters (Arabic)
 results/     generated CSV/JSON results
 ```
