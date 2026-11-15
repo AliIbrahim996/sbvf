@@ -111,7 +111,8 @@ analysis: Express `req.query/params/body/files/cookies/headers`, NestJS
 `@Query/@Param/@Body/@Headers/@Req` → `db.query`/`knex.raw`/`$queryRawUnsafe`,
 `child_process.exec`, `eval`/`vm`/`mathjs.eval`/`node-serialize`, `fs.*`,
 `axios`/`fetch`, `res.redirect`, `res.send`, strings returned by Nest handlers,
-and EJS views printing a tainted `res.render` value with unescaped `<%- %>`.
+and server-side templates printing a tainted `res.render` value with an
+unescaped construct — EJS `<%- %>`, Handlebars `{{{ }}}`, Pug `!=`/`!{}`.
 Scanning `https://github.com/appsecco/dvna` reports its SQLi, command injection,
 math.js and node-serialize RCEs, open redirect and EJS XSS — no false positives.
 
@@ -135,10 +136,24 @@ python -m sbvf.scan_repo \
   --runs 15 --budget 60
 ```
 
+For a **Node.js** project the app can be launched automatically — no `--start`
+needed. With `--node-install` it runs `npm install` first, then detects the start
+command from `package.json` (`scripts.start`, `main`, or a conventional entry
+file) and injects `PORT` from `--base`:
+
+```bash
+python -m sbvf.scan_repo \
+  --repo https://github.com/<user>/<express-app> \
+  --base http://127.0.0.1:3000 \
+  --from-sast --node-install \
+  --runs 15 --budget 60
+```
+
 Pipeline: **static taint analysis → candidate endpoints → GA/CS/RS confirmation.**
 The static pass recovers the request parameter, input method and handler function
-behind each finding; `sbvf/sast/bridge.py` turns GET-reachable `xss`/`sqli`
-findings into search targets:
+behind each finding; `sbvf/sast/bridge.py` turns confirmable findings into search
+targets — **XSS, SQL injection, command injection and open redirect**, injected
+through a **GET query parameter, a POST body, or a URL path segment**:
 
 | Stack | How the URL is recovered |
 |---|---|
@@ -149,10 +164,11 @@ findings into search targets:
 | NestJS | `@Controller('x')` + `@Get(':id')`/`@Post()`…, `app.setGlobalPrefix()` |
 | Laravel, Yii, native Python, native Node | not recovered → reported as *static-only* |
 
-Findings that cannot be tested over a GET query (POST bodies, URL path segments,
-command/code injection, unrecoverable routes) are listed as *static-only* with the
-reason, never silently dropped. This gives a precision figure — how many
-statically-reported points the search proves exploitable — and runs the algorithm
+Findings the search cannot yet drive (code injection, path traversal, SSRF, file
+inclusion, cookie/header inputs, or an unrecoverable route) are listed as
+*static-only* with the reason, never silently dropped. This gives a precision
+figure — how many statically-reported points the search proves exploitable — and
+runs the algorithm
 on real open-source code, not just the benchmark apps.
 
 ## Docker
