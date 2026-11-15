@@ -505,8 +505,16 @@ class TestExpress(unittest.TestCase):
         self.assertEqual(_vulns(self.r), {
             ("xss", 13), ("command_injection", 17), ("path_traversal", 21),
             ("open_redirect", 27), ("code_injection", 31),   # app.js
+            ("xss", 36), ("xss", 40),                        # Handlebars + Pug render
             ("sqli", 9), ("sqli", 14),                       # routes/users.js
         })
+
+    def test_template_engines(self):
+        by_line = {f["line"]: f["sink"] for f in self.r["findings"] if f["vuln"] == "xss"}
+        self.assertIn("profile.hbs", by_line[36])        # {{{ }}} Handlebars
+        self.assertIn("Handlebars", by_line[36])
+        self.assertIn("card.pug", by_line[40])           # != Pug
+        self.assertIn("Pug", by_line[40])
 
     def test_param_and_method(self):
         got = {(f["vuln"], f["line"]): (f["param"], f["method"]) for f in self.r["findings"]}

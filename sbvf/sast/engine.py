@@ -105,38 +105,76 @@ class Scanner:
         }
 
 
+# Server-side template engines: file extensions and the regexes that mark an
+# UNESCAPED output construct (the escaped variants are safe and not listed).
+#   EJS         <%- expr %>            (escaped: <%= %>)
+#   Handlebars  {{{ expr }}} / {{& e}} (escaped: {{ expr }})
+#   Pug/Jade    != expr  /  !{ expr }  (escaped: = expr / #{ expr })
+TEMPLATE_ENGINES = {
+    "ejs": {"exts": (".ejs",),
+            "raw": [re.compile(r"<%-(.*?)%>", re.S)], "label": "<%- %> EJS"},
+    "hbs": {"exts": (".hbs", ".handlebars"),
+            "raw": [re.compile(r"\{\{\{(.*?)\}\}\}", re.S),
+                    re.compile(r"\{\{&\s*(.*?)\}\}", re.S)], "label": "{{{ }}} Handlebars"},
+    "pug": {"exts": (".pug", ".jade"),
+            "raw": [re.compile(r"!=\s*([^\n]+)"),
+                    re.compile(r"!\{(.*?)\}", re.S)], "label": "!= / !{} Pug"},
+}
+_TPL_IDENT = re.compile(r"[A-Za-z_$][\w$]*(?:\s*\.\s*[A-Za-z_$][\w$]*)*")
+
+
 def _template_findings(base: str, flows) -> List[Finding]:
     """XSS where a tainted value passed to ``res.render`` is printed unescaped.
 
-    For each recorded render flow, open the EJS view and look for ``<%- expr %>``
-    (raw output; ``<%= %>`` HTML-escapes) whose expression is one of the tainted
+    For each recorded render flow, open the view (EJS, Handlebars or Pug) and look
+    for an *unescaped* output construct whose expression is one of the tainted
     object paths, e.g. ``res.render('products', {output: {term: req.query.q}})``
-    + ``<%- output.term %>``. The finding is reported at the ``res.render`` line
-    -- the handler that sends the page -- with the template location in the sink.
+    with ``<%- output.term %>`` / ``{{{ output.term }}}`` / ``!= output.term``.
+    The finding is reported at the ``res.render`` line -- the handler that sends
+    the page -- with the template engine and location in the sink.
     """
     templates = []
     for dirpath, dirnames, filenames in os.walk(base):
         dirnames[:] = [d for d in dirnames if d not in SKIP_DIRS]
         templates += [os.path.relpath(os.path.join(dirpath, fn), base).replace("\\", "/")
-                      for fn in filenames if fn.endswith(".ejs")]
+                      for fn in filenames
+                      if os.path.splitext(fn)[1] in _ALL_TEMPLATE_EXTS]
     out: List[Finding] = []
     for js_rel, fl in flows:
-        view = fl["view"].lstrip("/")
-        view = view if view.endswith(".ejs") else view + ".ejs"
-        matches = sorted((t for t in templates if t == view or t.endswith("/" + view)),
-                         key=lambda t: ("views/" not in t, len(t)))
-        if not matches:
+        tpl = _resolve_view(fl["view"], templates)
+        if not tpl:
             continue
-        tpl = matches[0]
+        engine = next(e for e in TEMPLATE_ENGINES.values()
+                      if os.path.splitext(tpl)[1] in e["exts"])
         try:
             with open(os.path.join(base, tpl), "r", encoding="utf-8", errors="replace") as fh:
                 text = fh.read()
         except OSError:
             continue
-        for m in re.finditer(r"<%-(.*?)%>", text, re.S):
+        f = _match_raw_output(text, tpl, engine, js_rel, fl)
+        if f:
+            out.append(f)
+    return out
+
+
+def _resolve_view(view: str, templates: List[str]) -> Optional[str]:
+    """Find the template file a ``res.render('view')`` call refers to."""
+    view = view.lstrip("/")
+    cands = []
+    for eng in TEMPLATE_ENGINES.values():
+        for ext in eng["exts"]:
+            v = view if view.endswith(ext) else view + ext
+            cands += [t for t in templates if t == v or t.endswith("/" + v)]
+    cands.sort(key=lambda t: ("views/" not in t, len(t)))
+    return cands[0] if cands else None
+
+
+def _match_raw_output(text, tpl, engine, js_rel, fl) -> Optional[Finding]:
+    for rx in engine["raw"]:
+        for m in rx.finditer(text):
             expr = m.group(1).strip()
-            im = re.match(r"[A-Za-z_$][\w$]*(?:\s*\.\s*[A-Za-z_$][\w$]*)*", expr)
-            if not im or expr.startswith("include"):
+            im = _TPL_IDENT.match(expr)
+            if not im or expr.startswith(("include", "{")):   # EJS include / Pug attrs
                 continue
             ident = re.sub(r"\s+", "", im.group(0))
             hit = next(((p, src, ep) for p, src, ep in fl["paths"]
@@ -146,14 +184,16 @@ def _template_findings(base: str, flows) -> List[Finding]:
                 continue
             tline = text[:m.start()].count("\n") + 1
             param, method = hit[2] or ("", "GET")
-            sink = f"res.render -> {tpl}:{tline} <%- {ident} %> (unescaped EJS)"
-            out.append(Finding(
+            sink = f"res.render -> {tpl}:{tline} ({engine['label']}, unescaped)"
+            return Finding(
                 vuln="xss", file=js_rel, line=fl["line"], sink=sink, source=hit[1],
                 framework=fl["framework"], code=fl["code"], param=param, method=method,
                 function=fl["function"],
-                message=f"Tainted value from {hit[1]} is rendered unescaped by {tpl}:{tline}."))
-            break                                   # one finding per render call
-    return out
+                message=f"Tainted value from {hit[1]} is rendered unescaped by {tpl}:{tline}.")
+    return None
+
+
+_ALL_TEMPLATE_EXTS = {ext for e in TEMPLATE_ENGINES.values() for ext in e["exts"]}
 
 
 def _counts(findings: List[Finding]) -> Dict:
