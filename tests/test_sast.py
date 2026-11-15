@@ -18,12 +18,16 @@ from http.server import ThreadingHTTPServer
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+import urllib.parse                                          # noqa: E402
+from http.server import BaseHTTPRequestHandler               # noqa: E402
+
 from sbvf.sast import scan_path, derive_endpoints, extract_routes  # noqa: E402
 from sbvf.sast.php import PhpAnalyzer                         # noqa: E402
 from sbvf.sast.python_analyzer import PythonAnalyzer          # noqa: E402
 from sbvf.algorithms import ALGORITHMS                        # noqa: E402
-from sbvf.external import run_external                        # noqa: E402
-from sbvf.oracles import Target                               # noqa: E402
+from sbvf.external import run_external, ExternalEndpoint      # noqa: E402
+from sbvf.oracles import Target, Oracle                       # noqa: E402
+from sbvf.fitness import CMDI_MARKER                          # noqa: E402
 import testbed.app as app                                     # noqa: E402
 
 SAMPLES = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
@@ -195,9 +199,10 @@ class TestDeriveEndpoints(unittest.TestCase):
         got = {(e.path, e.param, e.vuln) for e in eps}
         self.assertIn(("/vuln.php", "id", "sqli"), got)
         self.assertIn(("/vuln.php", "name", "xss"), got)
-        # command/code/file-inclusion are not GET-confirmable -> static-only
-        self.assertTrue(all(e.vuln in ("xss", "sqli") for e in eps))
-        self.assertTrue(any(s["vuln"] == "command_injection" for s in skipped))
+        self.assertIn(("/vuln.php", "host", "command_injection"), got)   # now confirmable
+        # code injection / file inclusion are not dynamically confirmable -> static-only
+        skip_classes = {s["vuln"] for s in skipped}
+        self.assertEqual(skip_classes, {"code_injection", "file_inclusion"})
 
     def test_framework_routes_are_static_only(self):
         findings = [{"vuln": "sqli", "file": "app/Http/Controllers/X.php",
@@ -327,23 +332,31 @@ class TestDerivePythonEndpoints(unittest.TestCase):
         return derive_endpoints(scan_path(root)["findings"], routes=extract_routes(root))
 
     def test_django_sample(self):
-        eps, skipped = self._derive("python_django")
+        eps, _ = self._derive("python_django")
         self.assertEqual({(e.path, e.param, e.vuln) for e in eps},
-                         {("/profile/1/", "name", "sqli"), ("/profile/1/", "name", "xss")})
-        self.assertTrue(any(s["vuln"] == "open_redirect" for s in skipped))
+                         {("/profile/1/", "name", "sqli"), ("/profile/1/", "name", "xss"),
+                          ("/go/", "next", "open_redirect")})
 
     def test_fastapi_sample(self):
         eps, _ = self._derive("python_fastapi")
         self.assertEqual({(e.path, e.param, e.vuln) for e in eps},
-                         {("/user", "name", "sqli"), ("/user", "name", "xss")})
+                         {("/user", "name", "sqli"), ("/user", "name", "xss"),
+                          ("/run", "cmd", "command_injection")})
 
-    def test_path_param_is_static_only(self):
-        f = {"vuln": "sqli", "file": "views.py", "framework": "django",
-             "method": "PATH", "param": "uid", "function": "profile",
-             "location": "views.py:3"}
-        eps, skipped = derive_endpoints([f], routes={})
-        self.assertEqual(eps, [])
-        self.assertIn("path segment", skipped[0]["reason"])
+    def test_path_param_becomes_path_endpoint(self):
+        with _project({"main.py": """
+            import sqlite3
+            from fastapi import FastAPI
+            app = FastAPI()
+            @app.get("/u/{uid}")
+            def h(uid: str):
+                sqlite3.connect("x").cursor().execute("SELECT * FROM t WHERE id=" + uid)
+        """}) as root:
+            eps, _ = derive_endpoints(scan_path(root)["findings"],
+                                      routes=extract_routes(root))
+            self.assertEqual(len(eps), 1)
+            e = eps[0]
+            self.assertEqual((e.vuln, e.where, e.path_template), ("sqli", "path", "/u/__SBVF__"))
 
     def test_post_only_route_is_static_only(self):
         with _project({"main.py": """
@@ -630,11 +643,25 @@ class TestNodeRoutesAndBridge(unittest.TestCase):
 
     def test_derived_endpoints(self):
         eps, _ = self._derive("node_express")
-        self.assertEqual({(e.path, e.param, e.vuln) for e in eps},
-                         {("/search", "q", "xss"), ("/users", "name", "sqli")})
+        self.assertEqual({(e.path, e.param, e.vuln, e.method, e.where) for e in eps}, {
+            ("/search", "q", "xss", "GET", "query"),
+            ("/profile", "bio", "xss", "GET", "query"),      # Handlebars render
+            ("/card", "name", "xss", "GET", "query"),        # Pug render
+            ("/ping", "host", "command_injection", "GET", "query"),
+            ("/go", "next", "open_redirect", "GET", "query"),
+            ("/users", "name", "sqli", "GET", "query"),
+            ("/users/1", "id", "sqli", "GET", "path"),       # URL path segment
+        })
+        byp = {e.path: e for e in eps}
+        self.assertEqual(byp["/users/1"].path_template, "/users/__SBVF__")
+
         eps, _ = self._derive("node_nestjs")
-        self.assertEqual({(e.path, e.param, e.vuln) for e in eps},
-                         {("/api/users/search", "name", "sqli"), ("/api/users/greet", "who", "xss")})
+        self.assertEqual({(e.path, e.param, e.vuln, e.method, e.where) for e in eps}, {
+            ("/api/users/search", "name", "sqli", "GET", "query"),
+            ("/api/users/greet", "who", "xss", "GET", "query"),
+            ("/api/users/1", "id", "sqli", "GET", "path"),
+            ("/api/users/run", "cmd", "command_injection", "POST", "body"),
+        })
 
     def test_named_handler_in_other_module(self):
         with _project({
@@ -708,6 +735,115 @@ class TestGuidedNodeConfirmation(unittest.TestCase):
         }, "CS")
         self.assertEqual((ep.path, ep.param, ep.vuln), ("/sqli/error", "name", "sqli"))
         self.assertEqual(hits, 1)
+
+
+# --- dynamic confirmation of command injection / redirect / POST / path -------------
+
+def _shell_echoes_marker(value: str) -> bool:
+    """Faithfully model `exec('ping ' + value)`: a shell runs the injected
+    `echo <marker>` after a metacharacter, so the marker reaches the output. No
+    real shell is spawned -- this mirrors the behaviour deterministically."""
+    for sep in (";", "|", "&&", "&", "`", "$("):
+        if sep in value:
+            tail = value.split(sep, 1)[1]
+            if CMDI_MARKER in tail:
+                return True
+    return "`echo %s`" % CMDI_MARKER in value or "$(echo %s)" % CMDI_MARKER in value
+
+
+class _VulnMock(BaseHTTPRequestHandler):
+    """A deterministic 'vulnerable' app exercising each injection site/class."""
+
+    def log_message(self, *a):
+        pass
+
+    def _reply(self, status, body, headers=None):
+        self.send_response(status)
+        for k, v in (headers or {}).items():
+            self.send_header(k, v)
+        self.send_header("Content-Type", "text/html")
+        self.end_headers()
+        self.wfile.write(body.encode())
+
+    def do_GET(self):
+        parsed = urllib.parse.urlparse(self.path)
+        seg = urllib.parse.unquote(parsed.path.strip("/").split("/")[-1])
+        q = urllib.parse.parse_qs(parsed.query)
+        path = parsed.path
+        if path.startswith("/exec"):                       # command injection (query)
+            val = q.get("host", [""])[0]
+            return self._reply(200, "PING ok\n" + (CMDI_MARKER if _shell_echoes_marker(val) else ""))
+        if path.startswith("/redirect"):                   # open redirect (query), no-follow
+            return self._reply(302, "", {"Location": q.get("next", [""])[0]})
+        if path.startswith("/item/"):                      # SQLi via URL path segment
+            body = "sqlite3.OperationalError: near syntax error" if "'" in seg else "row"
+            return self._reply(200, body)
+        return self._reply(404, "nope")
+
+    def do_POST(self):
+        length = int(self.headers.get("Content-Length") or 0)
+        form = urllib.parse.parse_qs(self.rfile.read(length).decode())
+        if self.path.startswith("/run"):                   # command injection (POST body)
+            val = form.get("cmd", [""])[0]
+            return self._reply(200, "run\n" + (CMDI_MARKER if _shell_echoes_marker(val) else ""))
+        return self._reply(404, "nope")
+
+
+class TestDynamicConfirmation(unittest.TestCase):
+    """The search confirms command injection, open redirect, POST-body and
+    URL-path-segment injections against a deterministic vulnerable mock."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.srv = ThreadingHTTPServer(("127.0.0.1", 0), _VulnMock)
+        threading.Thread(target=cls.srv.serve_forever, daemon=True).start()
+        time.sleep(0.2)
+        cls.base = f"http://127.0.0.1:{cls.srv.server_address[1]}"
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.srv.shutdown()
+        cls.srv.server_close()
+
+    def _run(self, ep, algo="GA", budget=300):
+        rep = run_external(self.base, [ep], runs=1, budget=budget,
+                           methods={algo: ALGORITHMS[algo]})
+        return rep[0]["methods"][algo]["detections"]
+
+    def test_command_injection_query(self):
+        ep = ExternalEndpoint("/exec", "host", "command_injection", method="GET", where="query")
+        self.assertEqual(self._run(ep), 1)
+
+    def test_command_injection_post_body(self):
+        ep = ExternalEndpoint("/run", "cmd", "command_injection", method="POST", where="body")
+        self.assertEqual(self._run(ep), 1)
+
+    def test_open_redirect_query(self):
+        ep = ExternalEndpoint("/redirect", "next", "open_redirect", method="GET", where="query")
+        self.assertEqual(self._run(ep, algo="CS"), 1)
+
+    def test_sqli_url_path_segment(self):
+        ep = ExternalEndpoint("/item/1", "id", "sqli", method="GET", where="path",
+                              path_template="/item/__SBVF__")
+        self.assertEqual(self._run(ep, algo="RS"), 1)
+
+    def test_no_false_positive_on_safe_redirect(self):
+        # an app that ignores `next` and never sets Location is not confirmed
+        class _Safe(_VulnMock):
+            def do_GET(self):
+                self._reply(200, "home")
+        srv = ThreadingHTTPServer(("127.0.0.1", 0), _Safe)
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        time.sleep(0.1)
+        try:
+            base = f"http://127.0.0.1:{srv.server_address[1]}"
+            ep = ExternalEndpoint("/redirect", "next", "open_redirect", where="query")
+            rep = run_external(base, [ep], runs=1, budget=120,
+                               methods={"GA": ALGORITHMS["GA"]})
+            self.assertEqual(rep[0]["methods"]["GA"]["detections"], 0)
+        finally:
+            srv.shutdown()
+            srv.server_close()
 
 
 if __name__ == "__main__":

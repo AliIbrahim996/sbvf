@@ -89,6 +89,32 @@ GRAMMARS = {
                  "role=superuser", "priv=admin", "access=admin", "level=9"],
         "post": [""],
     },
+    # Command injection: a benign command (echo of a unique marker, or a short delay)
+    # is appended to a legitimate value through a shell metacharacter. The oracle
+    # confirms by the marker appearing in the output or by the induced delay. Only
+    # harmless commands are used -- the goal is to prove execution, not to cause harm.
+    "command_injection": {
+        "pre": ["127.0.0.1", "x", "8.8.8.8", "localhost", "a"],
+        "core": [
+            "; echo SBVFcmdi7r3", "| echo SBVFcmdi7r3", "&& echo SBVFcmdi7r3",
+            "`echo SBVFcmdi7r3`", "$(echo SBVFcmdi7r3)", "; echo SBVFcmdi7r3 #",
+            "| echo SBVFcmdi7r3", "%0aecho SBVFcmdi7r3",
+            "; sleep 3", "& ping -n 3 127.0.0.1", "| sleep 3",
+        ],
+        "post": ["", " #", " ;", "||"],
+    },
+    # Open redirect: the "payload" is an off-site target the app may redirect to.
+    # Confirmed when it appears in the Location header. example.com is a reserved
+    # documentation domain, never actually contacted by the oracle.
+    "open_redirect": {
+        "pre": [""],
+        "core": [
+            "//example.com", "https://example.com", "http://example.com",
+            "//example.com/%2f..", "/\\example.com", "https:/example.com",
+            "//example.com%2f", "////example.com", "//example.com\\@x",
+        ],
+        "post": ["", "/", "?", "#", "/login"],
+    },
 }
 
 # Character-level transforms used for filter evasion.

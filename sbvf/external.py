@@ -25,10 +25,13 @@ from . import stats
 class ExternalEndpoint:
     path: str
     param: str
-    vuln: str                 # "xss" | "sqli"
+    vuln: str                 # "xss" | "sqli" | "command_injection" | "open_redirect"
     label: str = "unknown"    # "vulnerable" for documented points, else "unknown"
     note: str = ""
     extra: dict | None = None  # fixed extra query params (e.g. DVWA's Submit=Submit)
+    method: str = "GET"        # GET | POST
+    where: str = "query"       # query | body | path
+    path_template: str | None = None  # for where == "path": sentinel-marked URL
 
 
 # --- Known injection points for DSVW (Damn Small Vulnerable Web, @stamparm) -------
@@ -84,13 +87,15 @@ def run_external(base_url: str, endpoints, runs: int, budget: int,
     report = []
     for e in endpoints:
         row = {"path": e.path, "param": e.param, "vuln": e.vuln,
-               "label": e.label, "note": e.note, "methods": {}}
+               "label": e.label, "note": e.note, "method": e.method,
+               "where": e.where, "methods": {}}
         for name, method in methods.items():
             seeds = [0] if name == "Static" else range(runs)
             confirmed, evals = 0, []
             for seed in seeds:
                 t = Target(base_url, allow_remote=allow_remote, cookies=cookies)
-                o = Oracle(t, e.path, e.param, e.vuln, extra=e.extra)
+                o = Oracle(t, e.path, e.param, e.vuln, extra=e.extra,
+                           method=e.method, where=e.where, path_template=e.path_template)
                 res = method(o, budget, seed)
                 if res.confirmed:
                     confirmed += 1

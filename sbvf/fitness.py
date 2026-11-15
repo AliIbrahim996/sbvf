@@ -82,6 +82,58 @@ def _looks_positive(body: str) -> bool:
     return bool(m and int(m.group(1)) > 0)
 
 
+# A harmless, unique token the command-injection grammar asks the shell to echo.
+# If it appears in the response, an injected command actually executed. Using a
+# benign `echo` (not a destructive command) keeps the oracle safe on local labs.
+CMDI_MARKER = "SBVFcmdi7r3"
+
+
+def command_injection_fitness(payload: str, resp, baseline_elapsed: float = 0.0
+                              ) -> tuple[float, bool]:
+    """Command-injection fitness.
+
+    confirmed: the marker that the injected ``echo`` would print appears in the
+    response body (output-based), or the response is far slower than a benign
+    baseline when the payload carries a delay command (time-based). Both prove the
+    shell actually ran the injected command rather than treating it as data.
+    Otherwise a gradient rewards shell metacharacters surviving into the output.
+    """
+    body = resp.body
+    if CMDI_MARKER in body:
+        return 1.0, True
+    if baseline_elapsed and resp.elapsed > baseline_elapsed + 1.5 \
+            and re.search(r"sleep\s+\d|timeout\s+/t|ping\b.*-[nc]\s*\d", payload, re.I):
+        return 1.0, True
+    gradient = 0.0
+    if any(c in payload for c in [";", "|", "&", "`", "$("]):
+        gradient = 0.3
+        if any(c in body for c in [";", "|", "`"]):      # metachars reflected unfiltered
+            gradient = 0.5
+    return gradient, False
+
+
+def open_redirect_fitness(payload: str, resp) -> tuple[float, bool]:
+    """Open-redirect fitness.
+
+    confirmed: the response is a redirect (3xx) or a meta refresh whose target is
+    the attacker-controlled location carried by the payload -- an absolute URL or
+    a scheme-relative ``//host`` pointing off-site. A same-path reflection that is
+    not used as a redirect target does not count.
+    """
+    loc = (resp.headers.get("Location") or resp.headers.get("location") or "").strip()
+    target = payload.strip()
+    off_site = re.match(r"(?:https?:)?//|https?:\\\\|/\\", target) is not None
+    if resp.status in (301, 302, 303, 307, 308) and loc:
+        if loc == target or (off_site and target in loc) or loc.startswith(("//", "http")):
+            return 1.0, True
+        return 0.5, False
+    # meta-refresh fallback (some apps redirect in HTML rather than a header)
+    m = re.search(r"url=([^\"'>\s]+)", resp.body, re.I)
+    if m and off_site and target in m.group(1):
+        return 1.0, True
+    return (0.3 if off_site else 0.0), False
+
+
 def idor_fitness(body: str, status: int, my_token: str) -> tuple[float, bool]:
     """IDOR fitness for a low-privilege identity `my_token`.
 
