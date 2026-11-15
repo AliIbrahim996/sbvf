@@ -230,8 +230,9 @@
           <option value="python_django">Python · Django</option>
         </select>
       </div>
-      <div class="field" style="flex:1;min-width:220px"><label>…or a local path to scan</label>
-        <input id="scanpath" type="text" placeholder="e.g. C:\path\to\project (overrides sample)"
+      <div class="field" style="flex:1;min-width:220px"><label>…or a local folder / GitHub · GitLab · Bitbucket repo URL</label>
+        <input id="scanpath" type="text"
+               placeholder="C:\path\to\project   or   https://github.com/owner/repo (overrides sample)"
                style="min-width:100%">
       </div>
       <button class="run-btn" id="scan">▶&nbsp;&nbsp;Scan code</button>
@@ -374,8 +375,8 @@ function slog(kind,text){
   const log=el("slog");
   if(log.querySelector(".empty")) log.innerHTML="";
   const atBottom=log.scrollTop+log.clientHeight>=log.scrollHeight-24;
-  const map={detect:"b-detect",file:"b-file",source:"b-src",finding:"b-find",summary:"b-sum"};
-  const lbl={detect:"DETECT",file:"FILE",source:"SOURCE",finding:"FINDING",summary:"DONE"};
+  const map={clone:"b-detect",detect:"b-detect",file:"b-file",source:"b-src",finding:"b-find",summary:"b-sum",error:"b-find"};
+  const lbl={clone:"CLONE",detect:"DETECT",file:"FILE",source:"SOURCE",finding:"FINDING",summary:"DONE",error:"ERROR"};
   const ln=document.createElement("div"); ln.className="ln";
   ln.innerHTML=`<span class="badge ${map[kind]||'b-file'}">${lbl[kind]||kind}</span>`+
     `<span class="pl">${esc(text)}</span>`;
@@ -402,13 +403,15 @@ el("scan").onclick=()=>{
   el("slog").innerHTML=""; el("s-files").textContent="0"; el("s-total").textContent="0";
   el("s-high").textContent="0"; el("s-fw").textContent="…"; el("s-count").textContent="scanning…";
   renderFindings([]);
-  el("scan").disabled=true; el("s-msg").textContent="Scanning…";
   const sample=el("sample").value, path=el("scanpath").value.trim();
+  const remote=/^(https?:\/\/|git@|(www\.)?(github\.com|gitlab\.com|bitbucket\.org)\/)/i.test(path);
+  el("scan").disabled=true; el("s-msg").textContent=remote?"Cloning repository…":"Scanning…";
   const q=path?`path=${encodeURIComponent(path)}`:`sample=${sample}`;
   ses=new EventSource(`/api/scan?${q}`);
   ses.addEventListener("scan_step",e=>{
     const d=JSON.parse(e.data);
     slog(d.kind,d.text);
+    if(d.kind==="detect") el("s-msg").textContent="Scanning…";
     if(d.kind==="detect"&&d.data&&d.data.frameworks){
       el("s-fw").textContent=Object.values(d.data.frameworks).filter(Boolean).join(", ")||"none";
       if(d.data.file_count!=null) el("s-files").textContent=d.data.file_count;
@@ -429,7 +432,8 @@ el("scan").onclick=()=>{
     el("s-msg").textContent="Completed"; el("scan").disabled=false; ses.close();
   });
   ses.addEventListener("scan_error",e=>{
-    const d=JSON.parse(e.data); slog("finding","ERROR: "+d.message);
+    const d=JSON.parse(e.data); slog("error",d.message);
+    el("s-count").textContent="0 vulnerabilities";
     el("s-msg").textContent="Error"; el("scan").disabled=false; ses.close();
   });
   ses.onerror=()=>{el("s-msg").textContent="Stream ended"; el("scan").disabled=false; if(ses) ses.close();};

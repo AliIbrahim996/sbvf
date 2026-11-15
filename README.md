@@ -82,11 +82,24 @@ Django). Detected classes include SQL injection, XSS, command/code injection,
 file inclusion, path traversal and open redirect (each mapped to a CWE).
 
 ```bash
-# scan a bundled sample, a local project, or clone-scan-remove a repo
+# scan a bundled sample, a local folder, or clone-scan-remove a remote repo
 python -m sbvf.scan_code testbed/sast_samples/php_laravel
 python -m sbvf.scan_code path/to/project --json report.json
-python -m sbvf.scan_code --repo https://github.com/user/project
+python -m sbvf.scan_code https://github.com/user/project
 ```
+
+The target is **either a local folder or a remote repository URL**. Remote
+repositories must be public and hosted on **GitHub, GitLab or Bitbucket**
+(`https://` only; other hosts, SSH, credentials and ports are rejected). They
+are shallow-cloned into a temp folder with prompts and symlinks disabled,
+scanned, and deleted. The dashboard's SAST tab accepts the same input; any local
+folder is allowed while the dashboard listens on localhost, and local scans are
+limited to the project folder if it is exposed with `SBVF_UI_HOST`.
+
+Besides Django/FastAPI/PHP, stdlib `http.server` apps are understood too
+(`self.path`/`self.headers` as sources, `self.wfile.write` and `Location`
+headers as sinks) — e.g. scanning `https://github.com/stamparm/DSVW` reports
+SQLi, command/code injection, path traversal, XSS and an open redirect.
 
 Every step streams into the dashboard's **Static analysis** tab
 (`python -m ui.server`, then the 🧬 tab). Six intentionally-vulnerable sample

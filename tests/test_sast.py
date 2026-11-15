@@ -416,5 +416,76 @@ class TestGuidedPythonConfirmation(unittest.TestCase):
         self.assertEqual(hits, 1)
 
 
+class TestRepoURLs(unittest.TestCase):
+    """Remote scans accept only GitHub, GitLab and Bitbucket https URLs."""
+
+    def test_accepted_and_normalised(self):
+        from sbvf.sast.repo import normalize_repo_url as n
+        self.assertEqual(n("https://github.com/o/r/tree/main/src"), "https://github.com/o/r.git")
+        self.assertEqual(n("github.com/o/r.git"), "https://github.com/o/r.git")
+        self.assertEqual(n("https://gitlab.com/g/sub/p/-/blob/main/x.py"),
+                         "https://gitlab.com/g/sub/p.git")
+        self.assertEqual(n("https://bitbucket.org/ws/r/src/main/"), "https://bitbucket.org/ws/r.git")
+
+    def test_rejected(self):
+        from sbvf.sast.repo import RepoURLError, normalize_repo_url
+        for bad in ("https://evil.com/o/r", "https://github.com.evil.com/o/r",
+                    "http://github.com/o/r", "https://u:p@github.com/o/r",
+                    "git@github.com:o/r.git", "https://github.com:444/o/r",
+                    "file:///etc/passwd", "https://github.com/o", "https://github.com/-o/r"):
+            with self.assertRaises(RepoURLError, msg=bad):
+                normalize_repo_url(bad)
+
+    def test_local_vs_remote(self):
+        from sbvf.sast.repo import is_repo_url
+        self.assertTrue(is_repo_url("https://github.com/o/r"))
+        self.assertTrue(is_repo_url("gitlab.com/g/p"))
+        self.assertFalse(is_repo_url(r"C:\projects\app"))
+        self.assertFalse(is_repo_url("testbed/sast_samples/php_native"))
+
+    @unittest.skipUnless(os.environ.get("SBVF_NET_TESTS"), "set SBVF_NET_TESTS=1 for network tests")
+    def test_real_github_clone(self):
+        from sbvf.sast.repo import clone_repo, remove_tree
+        d = clone_repo("https://github.com/stamparm/DSVW")
+        try:
+            self.assertGreaterEqual(len(scan_path(d)["findings"]), 5)
+        finally:
+            remove_tree(d)
+        self.assertFalse(os.path.exists(d))
+
+
+class TestHttpServerApps(unittest.TestCase):
+    """Stdlib http.server apps (e.g. DSVW): self.path is a source, taint flows
+    through helper calls, wfile.write / Location headers are sinks."""
+
+    SRC = textwrap.dedent('''
+        import http.server, urllib.parse
+        class H(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):
+                path, query = self.path.split("?", 1)
+                params = dict(urllib.parse.parse_qsl(query))
+                status, cursor = 200, db.cursor()
+                cursor.execute("SELECT * FROM t WHERE id=" + params["id"])
+                self.send_header("Location", params["next"])
+                self.wfile.write(("<p>%s</p>" % params["q"]).encode())
+                self.wfile.write(str(len(params)).encode())
+        class NotAHandler:
+            def run(self):
+                open(self.path)
+    ''')
+
+    def test_sources_sinks_and_helpers(self):
+        got = {(f.vuln, f.line) for f in PythonAnalyzer("python-native").analyze("a.py", self.SRC)}
+        self.assertEqual(got, {("sqli", 8), ("open_redirect", 9), ("xss", 10)})
+
+    def test_tuple_assignment_is_element_wise(self):
+        src = ("def v(request):\n"
+               "    safe, name = 'x', request.GET['n']\n"
+               "    HttpResponse(safe)\n"
+               "    HttpResponse(name)\n")
+        got = [f.line for f in PythonAnalyzer("django").analyze("v.py", src)]
+        self.assertEqual(got, [4])
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

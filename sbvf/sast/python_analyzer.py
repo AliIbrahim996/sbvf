@@ -49,6 +49,19 @@ SANITIZERS = {
 # Attribute-style sanitizers matched by their final attribute name.
 SANITIZER_ATTRS = {"escape", "quote", "clean", "quote_plus", "sanitize"}
 
+# Standard-library http.server: inside a *RequestHandler subclass these `self`
+# attributes carry the raw request (path + query string, headers, body).
+HTTP_HANDLER_ATTRS = {"path", "headers", "rfile", "requestline"}
+
+# Calls whose result does NOT carry their arguments' taint. Every other call
+# propagates taint from its receiver/arguments (unless it is a sanitizer), which
+# is what lets taint survive helpers such as split/unquote/re.findall/dict(...).
+NON_PROPAGATING = {
+    "len", "isinstance", "issubclass", "hasattr", "callable", "type", "id", "hash",
+    "range", "execute", "executemany", "executescript", "connect", "cursor",
+    "commit", "close", "flush", "time", "ctime", "now",
+}
+
 # FastAPI parameter markers whose presence means "this parameter is user input".
 FASTAPI_PARAM_MARKERS = {"Query", "Path", "Body", "Form", "Cookie", "Header", "File"}
 # FastAPI route-decorator method names.
@@ -108,9 +121,10 @@ def _name_of(node) -> str:
 class _FuncScope:
     """Taint state for a single function (or the synthetic module scope)."""
 
-    def __init__(self, framework: str, func_name: str = ""):
+    def __init__(self, framework: str, func_name: str = "", http_handler: bool = False):
         self.framework = framework
         self.func_name = func_name
+        self.http_handler = http_handler   # method of an http.server RequestHandler
         self.tainted = {}   # var name -> human-readable source description
         self.origin = {}    # var name -> (request param, input method)
 
@@ -162,6 +176,10 @@ class _FuncScope:
             desc = self._req_attr_desc(node)
             if desc:
                 return desc
+            # http.server: self.path / self.headers / self.rfile in a RequestHandler
+            if self.http_handler and isinstance(node.value, ast.Name) \
+                    and node.value.id == "self" and node.attr in HTTP_HANDLER_ATTRS:
+                return f"http.server request (self.{node.attr})"
         # request.GET['id'] / request.POST['x'] / sys.argv[1] / environ['QUERY_STRING']
         if isinstance(node, ast.Subscript):
             base = node.value
@@ -220,20 +238,38 @@ class _FuncScope:
                         return t
             return None
         if isinstance(node, ast.Call):
-            fname = _name_of(node.func)
-            last = fname.split(".")[-1]
-            # "...".format(x) / tmpl.format(x) / "".join(parts) / str(x) / x.upper()
-            if last in ("format", "join", "str", "format_map", "replace",
-                        "strip", "lower", "upper", "decode", "encode", "title"):
-                # the value the method is called on
-                if isinstance(node.func, ast.Attribute):
-                    if self.taint_of(node.func.value):
-                        return self.taint_of(node.func.value)
-                for a in node.args:
-                    t = self.taint_of(a)
-                    if t:
-                        return t
+            # A call's result carries the taint of its receiver or any argument
+            # ("...".format(x), x.split('?'), unquote(x), dict(gen), helper(x) ...),
+            # except for sanitizers (handled above) and NON_PROPAGATING calls.
+            if _name_of(node.func).split(".")[-1] in NON_PROPAGATING:
+                return None
+            if isinstance(node.func, ast.Attribute):
+                t = self.taint_of(node.func.value)
+                if t:
+                    return t
+            for a in list(node.args) + [k.value for k in node.keywords]:
+                t = self.taint_of(a.value if isinstance(a, ast.Starred) else a)
+                if t:
+                    return t
             return None
+        if isinstance(node, ast.Lambda):              # re.sub(..., lambda m: x, ...)
+            return self.taint_of(node.body)
+        if isinstance(node, (ast.ListComp, ast.SetComp, ast.GeneratorExp, ast.DictComp)):
+            parts = [node.key, node.value] if isinstance(node, ast.DictComp) else [node.elt]
+            parts += [g.iter for g in node.generators]
+            for p in parts:
+                t = self.taint_of(p)
+                if t:
+                    return t
+            return None
+        if isinstance(node, ast.Dict):
+            for v in node.values:
+                t = self.taint_of(v)
+                if t:
+                    return t
+            return None
+        if isinstance(node, ast.Starred):
+            return self.taint_of(node.value)
         if isinstance(node, ast.Subscript):           # tainted[...] , dict.get handled above
             return self.taint_of(node.value)
         if isinstance(node, ast.Attribute):           # tainted.attr
@@ -273,9 +309,19 @@ class PythonAnalyzer:
         self._fixpoint(tree.body, module_scope)
         self._collect_sinks(tree.body, module_scope, findings)
 
+        # Methods of http.server request-handler classes read the raw request
+        # from self.path / self.headers / self.rfile (stdlib web apps).
+        handler_methods = set()
+        for cls in ast.walk(tree):
+            if isinstance(cls, ast.ClassDef) and any(
+                    _name_of(b).split(".")[-1].endswith("RequestHandler") for b in cls.bases):
+                handler_methods.update(id(n) for n in cls.body
+                                       if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)))
+
         for node in ast.walk(tree):
             if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                scope = _FuncScope(self.framework, node.name)
+                scope = _FuncScope(self.framework, node.name,
+                                   http_handler=id(node) in handler_methods)
                 self._seed_params(node, scope)
                 self._fixpoint(node.body, scope)
                 self._collect_sinks(node.body, scope, findings)
@@ -380,11 +426,14 @@ class PythonAnalyzer:
         assigns = []
         for node in self._scope_nodes(body):
             if isinstance(node, ast.Assign):
-                assigns.append((node.targets, node.value))
+                for t in node.targets:
+                    assigns.extend(self._pair(t, node.value))
             elif isinstance(node, ast.AnnAssign) and node.value is not None:
                 assigns.append(([node.target], node.value))
             elif isinstance(node, ast.AugAssign):
                 assigns.append(([node.target], node.value))
+            elif isinstance(node, (ast.For, ast.AsyncFor)):
+                assigns.append(([node.target], node.iter))   # for x in tainted: ...
         changed = True
         guard = 0
         while changed and guard < 50:
@@ -406,6 +455,18 @@ class PythonAnalyzer:
                             if ep:
                                 scope.origin[name] = ep
                                 changed = True
+
+    def _pair(self, target, value):
+        """Split ``a, b = x, y`` into element-wise assignments so only the
+        variables that actually receive tainted values become tainted."""
+        if isinstance(target, (ast.Tuple, ast.List)) and isinstance(value, (ast.Tuple, ast.List)) \
+                and len(target.elts) == len(value.elts) \
+                and not any(isinstance(e, ast.Starred) for e in target.elts + value.elts):
+            out = []
+            for t, v in zip(target.elts, value.elts):
+                out.extend(self._pair(t, v))
+            return out
+        return [([target], value)]
 
     def _target_names(self, target):
         if isinstance(target, ast.Name):
@@ -492,6 +553,18 @@ class PythonAnalyzer:
             src = first_tainted(pos[:1])
             if src:
                 return self._emit(findings, "xss", node, fname, src, scope)
+
+        # http.server handlers: the response body and the Location header
+        if scope.http_handler and fname == "self.wfile.write":
+            src = first_tainted(pos[:1])
+            if src:
+                return self._emit(findings, "xss", node, fname, src, scope)
+        if scope.http_handler and fname == "self.send_header" and len(pos) >= 2 \
+                and isinstance(pos[0], ast.Constant) \
+                and str(pos[0].value).lower() == "location":
+            src = first_tainted(pos[1:2])
+            if src:
+                return self._emit(findings, "open_redirect", node, fname, src, scope)
 
         # Open redirect
         if last in ("redirect", "HttpResponseRedirect", "RedirectResponse"):

@@ -1,7 +1,8 @@
 """Command-line entry point for the static (SAST) analyzer.
 
-Scan a local directory, a single file, or a GitHub repository (cloned shallowly,
-scanned, then deleted). Unlike the dynamic ``scan_repo`` flow, static analysis
+Scan a local directory, a single file, or a remote repository on GitHub, GitLab
+or Bitbucket (cloned shallowly into a temp folder, scanned, then deleted). Other
+hosts are rejected; see :mod:`sbvf.sast.repo` for the clone safeguards. Unlike the dynamic ``scan_repo`` flow, static analysis
 never starts or contacts the application, so it does not need a running server
 and performs no network requests to the target.
 
@@ -13,8 +14,9 @@ Examples
     # scan a bundled sample
     python -m sbvf.scan_code testbed/sast_samples/php_laravel
 
-    # clone, scan and remove a public repository
-    python -m sbvf.scan_code --repo https://github.com/user/project
+    # clone, scan and remove a public repository (GitHub / GitLab / Bitbucket)
+    python -m sbvf.scan_code https://github.com/user/project
+    python -m sbvf.scan_code --repo https://gitlab.com/group/project
 
     # machine-readable output
     python -m sbvf.scan_code path/to/project --json report.json
@@ -23,21 +25,11 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
-import shutil
-import subprocess
 import sys
-import tempfile
 
 from .sast import scan_path
 from .sast.model import Step
-
-
-def _clone(repo: str) -> str:
-    dest = tempfile.mkdtemp(prefix="sbvf_sast_")
-    print(f"[*] Cloning {repo} (shallow) ...")
-    subprocess.run(["git", "clone", "--depth", "1", repo, dest], check=True)
-    return dest
+from .sast.repo import RepoURLError, clone_repo, is_repo_url, normalize_repo_url, remove_tree
 
 
 def _printer(verbose: bool):
@@ -54,8 +46,9 @@ def _printer(verbose: bool):
 def main(argv=None):
     ap = argparse.ArgumentParser(
         description="SBVF static source-code vulnerability analyzer (SAST).")
-    ap.add_argument("path", nargs="?", help="local directory or file to scan")
-    ap.add_argument("--repo", help="clone this git URL, scan it, then delete it")
+    ap.add_argument("path", nargs="?",
+                    help="local folder/file, or a GitHub/GitLab/Bitbucket repo URL")
+    ap.add_argument("--repo", help="GitHub/GitLab/Bitbucket URL to clone, scan, delete")
     ap.add_argument("--json", help="write the full report to this JSON file")
     ap.add_argument("--verbose", "-v", action="store_true",
                     help="also print every file and taint source")
@@ -65,16 +58,26 @@ def main(argv=None):
         ap.error("provide a PATH to scan or --repo URL")
 
     cleanup = None
-    target = args.path
-    if args.repo:
-        target = cleanup = _clone(args.repo)
+    target = args.repo or args.path
+    if args.repo or is_repo_url(target):
+        try:
+            url = normalize_repo_url(target)
+        except RepoURLError as exc:
+            ap.error(f"{exc} (accepted: a local folder or a GitHub, GitLab or "
+                     f"Bitbucket repository URL)")
+        print(f"[*] Cloning {url} (shallow) ...")
+        try:
+            target = cleanup = clone_repo(url)
+        except RuntimeError as exc:
+            print(f"[x] {exc}", file=sys.stderr)
+            return 2
 
     try:
         result = scan_path(target, on_step=_printer(args.verbose))
     finally:
         if cleanup:
-            shutil.rmtree(cleanup, ignore_errors=True)
-            print(f"[*] Removed temporary clone.")
+            remove_tree(cleanup)
+            print("[*] Removed temporary clone.")
 
     counts = result["counts"]
     print("\n=== Summary ===")

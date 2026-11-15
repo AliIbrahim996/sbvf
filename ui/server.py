@@ -20,6 +20,9 @@ sys.path.insert(0, ROOT)
 from sbvf import datasets                    # noqa: E402
 from sbvf.experiment import iter_runs, analyze, SPLITS  # noqa: E402
 from sbvf.sast import scan_path              # noqa: E402
+from sbvf.sast.repo import (                 # noqa: E402
+    ALLOWED_HOSTS, RepoURLError, clone_repo, is_repo_url, normalize_repo_url,
+    remove_tree)
 from testbed.launcher import start_all       # noqa: E402
 
 # Bundled intentionally-vulnerable sample projects for the static analyzer.
@@ -38,6 +41,10 @@ SAST_DIR = os.path.join(ROOT, "testbed", "sast_samples")
 UI_HOST = os.environ.get("SBVF_UI_HOST", "127.0.0.1")
 UI_PORT = int(os.environ.get("SBVF_UI_PORT", "8080"))
 BASE_URLS = {}
+# Arbitrary local folders may be scanned only while the dashboard is reachable
+# from this machine alone; once exposed on a network interface, local scans are
+# confined to the project tree (remote repos stay allowed via the host allowlist).
+UI_IS_LOCAL = UI_HOST in ("127.0.0.1", "localhost", "::1")
 
 HTML = open(os.path.join(os.path.dirname(__file__), "index.html"),
             encoding="utf-8").read()
@@ -75,19 +82,17 @@ class UIHandler(BaseHTTPRequestHandler):
     def _scan_stream(self, qs):
         """Server-Sent Events stream for a static (SAST) source-code scan.
 
-        A ``sample`` key selects a bundled vulnerable project; a ``path`` selects
-        a location *inside the project tree* (paths outside it are rejected, so
-        the dashboard cannot be turned into an arbitrary file-disclosure tool
-        even if the UI is bound to a non-local interface).
+        The ``path`` key is either a **local folder** or the URL of a **remote
+        repository** on GitHub, GitLab or Bitbucket (shallow-cloned to a temp
+        folder, scanned, then deleted). Without ``path``, ``sample`` selects a
+        bundled vulnerable project.
+
+        Any local folder is accepted while the dashboard is bound to localhost;
+        if it is exposed on a network interface, local scans are confined to the
+        project tree so it cannot be used to read arbitrary files.
         """
         sample = qs.get("sample", [""])[0]
-        custom = qs.get("path", [""])[0]
-        if sample in SAST_SAMPLES:
-            target = os.path.join(SAST_DIR, sample)
-        elif custom:
-            target = os.path.abspath(custom)
-        else:
-            target = os.path.join(SAST_DIR, "php_native")
+        custom = qs.get("path", [""])[0].strip()
 
         self.send_response(200)
         self.send_header("Content-Type", "text/event-stream")
@@ -95,32 +100,70 @@ class UIHandler(BaseHTTPRequestHandler):
         self.send_header("Connection", "keep-alive")
         self.end_headers()
 
-        # Containment: the scan target must stay within the project root.
-        root_real = os.path.realpath(ROOT)
-        target_real = os.path.realpath(target)
-        try:
-            inside = os.path.commonpath([root_real, target_real]) == root_real
-        except ValueError:
-            inside = False   # different drive (Windows) -> outside the project
-        if not inside:
-            self._sse("scan_error",
-                      {"message": "path outside the project is not allowed"})
-            return
-
-        if not os.path.exists(target):
-            self._sse("scan_error", {"message": f"path not found: {target}"})
-            return
-
         def on_step(step):
             self._sse("scan_step", {"kind": step.kind, "text": step.text,
                                     "data": step.data})
+
+        clone_dir = None
         try:
+            if custom and is_repo_url(custom):
+                try:
+                    url = normalize_repo_url(custom)
+                except RepoURLError as exc:
+                    hosts = ", ".join(ALLOWED_HOSTS.values())
+                    self._sse("scan_error", {"message": f"{exc}. Accepted: a local "
+                                             f"folder or a {hosts} repository URL."})
+                    return
+                self._sse("scan_step", {"kind": "clone", "text":
+                          f"Cloning {url} (shallow, depth 1) ...", "data": {"repo": url}})
+                try:
+                    clone_dir = clone_repo(url)
+                except RuntimeError as exc:
+                    self._sse("scan_error", {"message": str(exc)})
+                    return
+                self._sse("scan_step", {"kind": "clone", "text":
+                          "Clone complete - starting static analysis "
+                          "(the clone is deleted afterwards)", "data": {}})
+                target = clone_dir
+            elif custom:
+                target = os.path.abspath(os.path.expanduser(custom))
+                error = self._local_target_error(target)
+                if error:
+                    self._sse("scan_error", {"message": error})
+                    return
+            else:
+                target = os.path.join(SAST_DIR, sample if sample in SAST_SAMPLES
+                                      else "php_native")
+
             result = scan_path(target, on_step=on_step)
+            if clone_dir:
+                result["root"] = url
             self._sse("scan_done", result)
         except (BrokenPipeError, ConnectionResetError):
             pass
         except Exception as exc:  # surface analyzer errors to the dashboard
-            self._sse("scan_error", {"message": str(exc)})
+            try:
+                self._sse("scan_error", {"message": str(exc)})
+            except (BrokenPipeError, ConnectionResetError):
+                pass
+        finally:
+            if clone_dir:
+                remove_tree(clone_dir)
+
+    def _local_target_error(self, target):
+        """Return an error message if a local scan target is not acceptable."""
+        if not os.path.exists(target):
+            return f"local folder not found: {target}"
+        if not UI_IS_LOCAL:
+            root_real, target_real = os.path.realpath(ROOT), os.path.realpath(target)
+            try:
+                inside = os.path.commonpath([root_real, target_real]) == root_real
+            except ValueError:
+                inside = False   # different drive (Windows) -> outside the project
+            if not inside:
+                return ("the dashboard is exposed on the network, so local scans are "
+                        "limited to the project folder; use a repository URL instead")
+        return None
 
     def _stream(self, qs):
         split = qs.get("split", ["all"])[0]
