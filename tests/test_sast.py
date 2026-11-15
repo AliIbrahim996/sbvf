@@ -8,6 +8,8 @@ Each test scans a bundled intentionally-vulnerable sample and asserts that:
 Runnable with pytest or `python -m tests.test_sast`.
 """
 import os
+import socket
+import subprocess
 import sys
 import tempfile
 import textwrap
@@ -844,6 +846,133 @@ class TestDynamicConfirmation(unittest.TestCase):
         finally:
             srv.shutdown()
             srv.server_close()
+
+
+# --- live Node.js runner (opt-in: set SBVF_NODE_TESTS=1; needs node on PATH) --------
+
+def _free_port() -> int:
+    s = socket.socket()
+    s.bind(("127.0.0.1", 0))
+    port = s.getsockname()[1]
+    s.close()
+    return port
+
+
+def _wait_port(port: int, timeout: float = 20.0) -> bool:
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        try:
+            with socket.create_connection(("127.0.0.1", port), timeout=1):
+                return True
+        except OSError:
+            time.sleep(0.2)
+    return False
+
+
+def _node_available() -> bool:
+    try:
+        subprocess.run(["node", "--version"], stdout=subprocess.DEVNULL,
+                       stderr=subprocess.DEVNULL, check=True)
+        return True
+    except (OSError, subprocess.CalledProcessError):
+        return False
+
+
+@unittest.skipUnless(os.environ.get("SBVF_NODE_TESTS") and _node_available(),
+                     "set SBVF_NODE_TESTS=1 and install Node.js for live-runner tests")
+class TestLiveNodeRunner(unittest.TestCase):
+    """Launch a real Node.js process locally and confirm a derived endpoint
+    against it with the search -- the full static-guided flow end to end."""
+
+    def _launch(self, files, start):
+        tmp = tempfile.TemporaryDirectory()
+        for rel, src in files.items():
+            path = os.path.join(tmp.name, rel)
+            os.makedirs(os.path.dirname(path) or tmp.name, exist_ok=True)
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write(textwrap.dedent(src))
+        proc, base = self._spawn(tmp.name, start)
+        return proc, base, tmp
+
+    def _spawn(self, app_dir, start):
+        port = _free_port()
+        env = dict(os.environ, PORT=str(port), HOST="127.0.0.1")
+        proc = subprocess.Popen(start, cwd=app_dir, env=env, shell=True,
+                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        if not _wait_port(port):
+            proc.kill()
+            self.skipTest("the Node app did not come up")
+        return proc, f"http://127.0.0.1:{port}"
+
+    def _stop(self, proc, tmp):
+        try:
+            if os.name == "nt":
+                subprocess.run(["taskkill", "/F", "/T", "/PID", str(proc.pid)],
+                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            else:
+                proc.terminate()
+            proc.wait(timeout=10)
+        except Exception:
+            proc.kill()
+        tmp.cleanup()
+
+    def test_builtin_http_command_injection(self):
+        # No npm needed: a real Node http server, intentionally vulnerable, that
+        # emulates the shell result deterministically (no child process spawned).
+        proc, base, tmp = self._launch({"app.js": """
+            const http = require('http');
+            const MARK = 'SBVFcmdi7r3';
+            http.createServer((req, res) => {
+              const u = new URL(req.url, 'http://x');
+              if (u.pathname === '/exec') {
+                const host = u.searchParams.get('host') || '';
+                const ran = /[;|&`$(]/.test(host) && host.includes('echo ' + MARK);
+                res.end('PING ' + (ran ? MARK : 'ok'));
+              } else { res.statusCode = 404; res.end('no'); }
+            }).listen(process.env.PORT, '127.0.0.1');
+        """}, "node app.js")
+        try:
+            ep = ExternalEndpoint("/exec", "host", "command_injection")
+            rep = run_external(base, [ep], runs=1, budget=300,
+                               methods={"GA": ALGORITHMS["GA"]})
+            self.assertEqual(rep[0]["methods"]["GA"]["detections"], 1)
+        finally:
+            self._stop(proc, tmp)
+
+    def test_express_from_sast_end_to_end(self):
+        # Full flow: npm install express -> launch -> static scan -> derive -> search.
+        files = {
+            "package.json": '{"name":"t","private":true,'
+                            '"dependencies":{"express":"^4.19.2"}}',
+            "server.js": """
+                const express = require('express');
+                const app = express();
+                app.get('/search', (req, res) => {
+                  res.send('<h1>' + req.query.q + '</h1>');   // reflected XSS
+                });
+                app.listen(process.env.PORT || 3000, '127.0.0.1');
+            """,
+        }
+        tmp = tempfile.TemporaryDirectory()
+        for rel, src in files.items():
+            with open(os.path.join(tmp.name, rel), "w", encoding="utf-8") as fh:
+                fh.write(textwrap.dedent(src))
+        from sbvf.sast import noderun
+        ok, msg = noderun.install_deps(tmp.name, timeout=240)
+        if not ok:
+            tmp.cleanup()
+            self.skipTest(f"npm install unavailable: {msg}")
+        eps, _ = derive_endpoints(scan_path(tmp.name)["findings"],
+                                  routes=extract_routes(tmp.name))
+        self.assertTrue(any(e.path == "/search" and e.vuln == "xss" for e in eps))
+        # launch in the SAME dir that now has node_modules from the install above
+        proc, base = self._spawn(tmp.name, noderun.detect_start(tmp.name))
+        try:
+            rep = run_external(base, [e for e in eps if e.path == "/search"],
+                               runs=1, budget=200, methods={"GA": ALGORITHMS["GA"]})
+            self.assertEqual(rep[0]["methods"]["GA"]["detections"], 1)
+        finally:
+            self._stop(proc, tmp)
 
 
 if __name__ == "__main__":

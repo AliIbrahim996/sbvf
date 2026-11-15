@@ -33,6 +33,11 @@ import urllib.request
 from .external import ExternalEndpoint, light_crawl, run_external
 from .oracles import LOCAL_HOSTS, Target
 from .sast import scan_path, derive_endpoints, extract_routes
+from .sast import noderun
+
+
+def _is_node_project(rundir: str) -> bool:
+    return os.path.isfile(os.path.join(rundir, "package.json"))
 
 
 def _acquire(repo: str, workdir: str) -> str:
@@ -78,7 +83,7 @@ def _stop(proc: subprocess.Popen):
 
 
 def scan(repo, start, base, endpoints, runs, budget, keep=False, crawl=True,
-         allow_remote=False, from_sast=False, web_root=""):
+         allow_remote=False, from_sast=False, web_root="", node_install=False):
     host = urllib.parse.urlparse(base).hostname or ""
     if host not in LOCAL_HOSTS and not allow_remote:
         sys.exit(f"[x] base host '{host}' is not local. Pass --allow-remote only for a "
@@ -87,13 +92,14 @@ def scan(repo, start, base, endpoints, runs, budget, keep=False, crawl=True,
     print("=" * 70)
     print("  SBVF repository scan - authorized local testing only")
     print(f"  repo : {repo}")
-    print(f"  start: {start}")
+    print(f"  start: {start or '(auto-detect)'}")
     print(f"  base : {base}")
     print("=" * 70)
 
     local_path = os.path.isdir(repo)
     workdir = repo if local_path else tempfile.mkdtemp(prefix="sbvf_scan_")
     proc = None
+    env = None
     try:
         rundir = _acquire(repo, workdir)
 
@@ -102,8 +108,25 @@ def scan(repo, start, base, endpoints, runs, budget, keep=False, crawl=True,
             sast_eps = _sast_endpoints(rundir, web_root)
             endpoints = list(endpoints) + sast_eps
 
+        # Node.js: install deps (opt-in) and auto-detect the start command.
+        if _is_node_project(rundir):
+            if node_install and noderun.needs_install(rundir):
+                print("[*] npm install ...")
+                ok, msg = noderun.install_deps(rundir)
+                print(f"    {msg}")
+                if not ok:
+                    sys.exit("[x] dependency install failed; pass --start to run it yourself.")
+            if not start:
+                start = noderun.detect_start(rundir)
+                if not start:
+                    sys.exit("[x] could not detect how to start the Node app; pass --start.")
+                port = urllib.parse.urlparse(base).port or 3000
+                env = noderun.launch_env(port)   # most Node apps honour PORT
+        if not start:
+            sys.exit("[x] no start command; pass --start.")
+
         print(f"[*] launching: {start}")
-        proc = subprocess.Popen(start, shell=True, cwd=rundir)
+        proc = subprocess.Popen(start, shell=True, cwd=rundir, env=env)
         if not _wait_up(base):
             sys.exit("[x] the application did not come up at the base URL in time.")
         print("[+] application is up")
@@ -150,7 +173,9 @@ def _sast_endpoints(rundir, web_root=""):
     print(f"    static findings      : {len(findings)}")
     print(f"    search-ready endpoints: {len(eps)}")
     for e in eps:
-        print(f"      -> {e.vuln:4} {e.path}?{e.param}=   [{e.note}]")
+        where = {"query": f"?{e.param}=", "body": f" [POST {e.param}]",
+                 "path": f" [path {e.param}]"}.get(e.where, "")
+        print(f"      -> {e.vuln:18} {e.path}{where}   [{e.note}]")
     if skipped:
         print(f"    static-only (not auto-confirmed): {len(skipped)}")
         for s in skipped[:12]:
@@ -179,8 +204,11 @@ def _print_report(report):
 def main(argv=None):
     ap = argparse.ArgumentParser(description="Scan an open-source web app with SBVF.")
     ap.add_argument("--repo", required=True, help="git URL, single-file URL, or local path")
-    ap.add_argument("--start", required=True, help="command to launch the app")
+    ap.add_argument("--start", default="", help="command to launch the app "
+                    "(optional for Node.js projects: auto-detected from package.json)")
     ap.add_argument("--base", required=True, help="local base URL to test, e.g. http://127.0.0.1:8000")
+    ap.add_argument("--node-install", action="store_true",
+                    help="run `npm install` before launching a Node.js project")
     ap.add_argument("--endpoints", nargs="*", default=[],
                     help="known points as path:param:vuln, e.g. /:id:sqli /:q:xss")
     ap.add_argument("--runs", type=int, default=15)
@@ -205,7 +233,7 @@ def main(argv=None):
 
     scan(args.repo, args.start, args.base, endpoints, args.runs, args.budget,
          keep=args.keep, crawl=not args.no_crawl, allow_remote=args.allow_remote,
-         from_sast=args.from_sast, web_root=args.web_root)
+         from_sast=args.from_sast, web_root=args.web_root, node_install=args.node_install)
 
 
 if __name__ == "__main__":
