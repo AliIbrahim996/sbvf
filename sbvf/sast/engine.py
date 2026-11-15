@@ -8,12 +8,14 @@ finding / summary) so the live dashboard and the CLI can show every step.
 from __future__ import annotations
 
 import os
+import re
 from typing import Callable, Dict, List, Optional
 
 from .model import Finding, Step, SEVERITY_RANK, VULN_INFO
-from .detect import iter_source_files, detect_frameworks, framework_for
+from .detect import SKIP_DIRS, iter_source_files, detect_frameworks, framework_for
 from .php import PhpAnalyzer
 from .python_analyzer import PythonAnalyzer
+from .js import JsAnalyzer
 
 
 class Scanner:
@@ -25,6 +27,12 @@ class Scanner:
     def _step(self, kind: str, text: str, **data):
         if self.on_step:
             self.on_step(Step(kind=kind, text=text, data=data))
+
+    def _report(self, f: Finding):
+        self._step("finding",
+                   f"   [{f.severity.upper()}] {f.title} ({f.cwe}) "
+                   f"{f.location()} - {f.source} -> {f.sink}",
+                   finding=f.to_dict())
 
     def scan(self, root: str) -> Dict:
         root = os.path.abspath(root)
@@ -40,6 +48,7 @@ class Scanner:
                    frameworks=frameworks, file_count=len(files))
 
         findings: List[Finding] = []
+        template_flows = []           # (js file, flow) from res.render(...) calls
         base = root if os.path.isdir(root) else os.path.dirname(root)
 
         for idx, path in enumerate(files, 1):
@@ -60,16 +69,23 @@ class Scanner:
 
             if path.endswith(".php"):
                 analyzer = PhpAnalyzer(fw)
-            else:
+            elif path.endswith(".py"):
                 analyzer = PythonAnalyzer(fw)
+            else:
+                analyzer = JsAnalyzer(fw)
 
             file_findings = analyzer.analyze(rel, source, on_source=on_source)
+            template_flows += [(rel, fl) for fl in getattr(analyzer, "template_flows", [])]
             for f in file_findings:
                 findings.append(f)
-                self._step("finding",
-                           f"   [{f.severity.upper()}] {f.title} ({f.cwe}) "
-                           f"{f.location()} - {f.source} -> {f.sink}",
-                           finding=f.to_dict())
+                self._report(f)
+
+        if template_flows:
+            self._step("file", f"Checking {len(template_flows)} template render(s) "
+                               f"for unescaped EJS output ...")
+            for f in _template_findings(base, template_flows):
+                findings.append(f)
+                self._report(f)
 
         findings.sort(key=lambda f: (SEVERITY_RANK.get(f.severity, 9),
                                      f.file, f.line))
@@ -87,6 +103,57 @@ class Scanner:
             "findings": [f.to_dict() for f in findings],
             "counts": counts,
         }
+
+
+def _template_findings(base: str, flows) -> List[Finding]:
+    """XSS where a tainted value passed to ``res.render`` is printed unescaped.
+
+    For each recorded render flow, open the EJS view and look for ``<%- expr %>``
+    (raw output; ``<%= %>`` HTML-escapes) whose expression is one of the tainted
+    object paths, e.g. ``res.render('products', {output: {term: req.query.q}})``
+    + ``<%- output.term %>``. The finding is reported at the ``res.render`` line
+    -- the handler that sends the page -- with the template location in the sink.
+    """
+    templates = []
+    for dirpath, dirnames, filenames in os.walk(base):
+        dirnames[:] = [d for d in dirnames if d not in SKIP_DIRS]
+        templates += [os.path.relpath(os.path.join(dirpath, fn), base).replace("\\", "/")
+                      for fn in filenames if fn.endswith(".ejs")]
+    out: List[Finding] = []
+    for js_rel, fl in flows:
+        view = fl["view"].lstrip("/")
+        view = view if view.endswith(".ejs") else view + ".ejs"
+        matches = sorted((t for t in templates if t == view or t.endswith("/" + view)),
+                         key=lambda t: ("views/" not in t, len(t)))
+        if not matches:
+            continue
+        tpl = matches[0]
+        try:
+            with open(os.path.join(base, tpl), "r", encoding="utf-8", errors="replace") as fh:
+                text = fh.read()
+        except OSError:
+            continue
+        for m in re.finditer(r"<%-(.*?)%>", text, re.S):
+            expr = m.group(1).strip()
+            im = re.match(r"[A-Za-z_$][\w$]*(?:\s*\.\s*[A-Za-z_$][\w$]*)*", expr)
+            if not im or expr.startswith("include"):
+                continue
+            ident = re.sub(r"\s+", "", im.group(0))
+            hit = next(((p, src, ep) for p, src, ep in fl["paths"]
+                        if ident == p or ident.startswith(p + ".") or p.startswith(ident + ".")),
+                       None)
+            if not hit:
+                continue
+            tline = text[:m.start()].count("\n") + 1
+            param, method = hit[2] or ("", "GET")
+            sink = f"res.render -> {tpl}:{tline} <%- {ident} %> (unescaped EJS)"
+            out.append(Finding(
+                vuln="xss", file=js_rel, line=fl["line"], sink=sink, source=hit[1],
+                framework=fl["framework"], code=fl["code"], param=param, method=method,
+                function=fl["function"],
+                message=f"Tainted value from {hit[1]} is rendered unescaped by {tpl}:{tline}."))
+            break                                   # one finding per render call
+    return out
 
 
 def _counts(findings: List[Finding]) -> Dict:

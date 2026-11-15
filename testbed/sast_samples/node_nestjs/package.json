@@ -1,0 +1,6 @@
+{
+  "name": "sast-sample-nestjs",
+  "private": true,
+  "description": "Intentionally vulnerable NestJS app (academic SAST target)",
+  "dependencies": { "@nestjs/common": "^10.3.0", "@nestjs/core": "^10.3.0", "typeorm": "^0.3.20" }
+}
