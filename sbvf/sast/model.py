@@ -72,7 +72,8 @@ class Finding:
     message: str = ""             # human-readable explanation
     column: int = 0               # best-effort column of the sink
     param: str = ""               # the request parameter carrying the taint (e.g. "id")
-    method: str = "GET"           # how the input arrives: GET | POST | REQUEST | COOKIE | ...
+    method: str = "GET"           # how the input arrives: GET | POST | REQUEST | COOKIE | PATH | ...
+    function: str = ""            # enclosing function (the request handler), "" at module level
 
     @property
     def cwe(self) -> str:

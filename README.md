@@ -109,12 +109,22 @@ python -m sbvf.scan_repo \
 ```
 
 Pipeline: **static taint analysis → candidate endpoints → GA/CS/RS confirmation.**
-The static pass recovers the request parameter and method behind each finding;
-`sbvf/sast/bridge.py` maps GET-reachable, file-routed **native-PHP** `xss`/`sqli`
-findings to targets and reports the rest as *static-only* (framework route tables
-are not file-based, so they are not auto-confirmed). This gives a precision
-figure — how many statically-reported points the search proves exploitable — and
-runs the algorithm on real open-source code, not just the benchmark apps.
+The static pass recovers the request parameter, input method and handler function
+behind each finding; `sbvf/sast/bridge.py` turns GET-reachable `xss`/`sqli`
+findings into search targets:
+
+| Stack | How the URL is recovered |
+|---|---|
+| PHP (native) | file-routed: `shop/item.php` + `$_GET['id']` → `/shop/item.php?id=` |
+| Django | `urls.py` `path()` patterns, incl. nested `include()` prefixes (`sbvf/sast/routes.py`) |
+| FastAPI | `@app.get/...` decorators, `APIRouter(prefix=)`, `include_router(prefix=)` |
+| Laravel, Yii, native Python | not recovered → reported as *static-only* |
+
+Findings that cannot be tested over a GET query (POST bodies, URL path segments,
+command/code injection, unrecoverable routes) are listed as *static-only* with the
+reason, never silently dropped. This gives a precision figure — how many
+statically-reported points the search proves exploitable — and runs the algorithm
+on real open-source code, not just the benchmark apps.
 
 ## Docker
 

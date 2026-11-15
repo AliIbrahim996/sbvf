@@ -23,7 +23,8 @@ in the thesis as threats to validity.
 from __future__ import annotations
 
 import ast
-from typing import Callable, List, Optional
+import re
+from typing import Callable, List, Optional, Tuple
 
 from .model import Finding
 
@@ -57,6 +58,40 @@ ROUTE_METHODS = {"get", "post", "put", "delete", "patch", "options",
 PARAM_SKIP = {"self", "cls", "request", "req", "db", "session", "background_tasks",
               "response", "websocket", "current_user", "settings"}
 
+# How a request attribute delivers its input (used to tell the dynamic search
+# whether a parameter is reachable with a GET query string).
+_ATTR_METHOD = {
+    "GET": "GET", "QUERY": "GET", "query_params": "GET", "args": "GET",
+    "query": "GET", "params": "GET",
+    "POST": "POST", "form": "POST", "data": "POST", "body": "POST",
+    "json": "POST", "get_json": "POST", "files": "POST", "content": "POST",
+    "values": "REQUEST", "cookies": "COOKIE", "headers": "HEADER",
+    "path_params": "PATH",
+}
+# FastAPI parameter marker -> input method.
+_MARKER_METHOD = {"Query": "GET", "Path": "PATH", "Body": "POST", "Form": "POST",
+                  "File": "POST", "Cookie": "COOKIE", "Header": "HEADER"}
+
+
+def _const_str(node) -> Optional[str]:
+    if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        return node.value
+    return None
+
+
+def _subscript_key(node: ast.Subscript):
+    """The subscript expression, unwrapping ast.Index on Python <= 3.8."""
+    s = node.slice
+    index_cls = getattr(ast, "Index", None)
+    if index_cls is not None and isinstance(s, index_cls):
+        s = s.value
+    return s
+
+
+def route_path_params(template: str) -> List[str]:
+    """Names of ``{param}`` placeholders in a FastAPI route template."""
+    return re.findall(r"\{(\w+)(?::[^}]*)?\}", template or "")
+
 
 def _name_of(node) -> str:
     """Return the dotted call/attribute name, e.g. ``os.system`` or ``cursor.execute``."""
@@ -73,9 +108,37 @@ def _name_of(node) -> str:
 class _FuncScope:
     """Taint state for a single function (or the synthetic module scope)."""
 
-    def __init__(self, framework: str):
+    def __init__(self, framework: str, func_name: str = ""):
         self.framework = framework
+        self.func_name = func_name
         self.tainted = {}   # var name -> human-readable source description
+        self.origin = {}    # var name -> (request param, input method)
+
+    # --- request-parameter recovery (for the SAST-guided dynamic search) ----
+
+    def _direct_param(self, node) -> Optional[Tuple[str, str]]:
+        """(param, method) if *node* reads one named request parameter, e.g.
+        ``request.GET.get('q')`` or ``request.GET['q']``."""
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) \
+                and node.func.attr in ("get", "getlist", "getone") and node.args:
+            key = _const_str(node.args[0])
+            if key and self._req_attr_desc(node.func.value):
+                return key, _ATTR_METHOD.get(node.func.value.attr, "GET")
+        if isinstance(node, ast.Subscript):
+            key = _const_str(_subscript_key(node))
+            if key and self._req_attr_desc(node.value):
+                return key, _ATTR_METHOD.get(node.value.attr, "GET")
+        return None
+
+    def origin_of(self, node) -> Optional[Tuple[str, str]]:
+        """Best-effort (param, method) behind the taint in expression *node*."""
+        for sub in ast.walk(node):
+            ep = self._direct_param(sub)
+            if ep:
+                return ep
+            if isinstance(sub, ast.Name) and sub.id in self.origin:
+                return self.origin[sub.id]
+        return None
 
     def is_source_expr(self, node) -> Optional[str]:
         """Return a source description if *node* reads untrusted input directly."""
@@ -212,7 +275,7 @@ class PythonAnalyzer:
 
         for node in ast.walk(tree):
             if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                scope = _FuncScope(self.framework)
+                scope = _FuncScope(self.framework, node.name)
                 self._seed_params(node, scope)
                 self._fixpoint(node.body, scope)
                 self._collect_sinks(node.body, scope, findings)
@@ -230,6 +293,7 @@ class PythonAnalyzer:
         all_args = list(args.posonlyargs) + list(args.args) + list(args.kwonlyargs)
         defaults_map = self._default_markers(args)
         has_request = any(a.arg in ("request", "req") for a in all_args)
+        path_params = set(self._route_path_params(func))
         for a in all_args:
             name = a.arg
             if name in PARAM_SKIP:
@@ -240,10 +304,16 @@ class PythonAnalyzer:
                 # str/int path or query parameter on a route handler.
                 if marker in FASTAPI_PARAM_MARKERS or (is_route and self._simple_type(a.annotation)):
                     scope.tainted[name] = f"request parameter '{name}'"
+                    if name in path_params:
+                        method = "PATH"
+                    else:
+                        method = _MARKER_METHOD.get(marker, "GET")
+                    scope.origin[name] = (name, method)
             elif self.framework == "django":
                 # Django view: positional URL kwargs after `request` are user-controlled.
                 if has_request and name not in ("request", "req"):
                     scope.tainted[name] = f"URL parameter '{name}'"
+                    scope.origin[name] = (name, "PATH")
             # native: parameters are not assumed to be user input.
             if name in scope.tainted and self._on_source:
                 self._on_source(scope.tainted[name], func.lineno)
@@ -266,6 +336,18 @@ class PythonAnalyzer:
         if ann is None:
             return True
         return _name_of(ann) in ("str", "int", "float", "bool", "")
+
+    def _route_path_params(self, func) -> List[str]:
+        """``{param}`` names in the handler's route decorator template, if any."""
+        out = []
+        for d in func.decorator_list:
+            if isinstance(d, ast.Call) and _name_of(d.func).split(".")[-1] in ROUTE_METHODS:
+                tmpl = _const_str(d.args[0]) if d.args else None
+                for k in d.keywords:
+                    if k.arg == "path":
+                        tmpl = _const_str(k.value)
+                out += route_path_params(tmpl)
+        return out
 
     def _is_route_handler(self, func) -> bool:
         for d in func.decorator_list:
@@ -319,6 +401,11 @@ class PythonAnalyzer:
                             changed = True
                             if self._on_source:
                                 self._on_source(src, getattr(value, "lineno", 0))
+                        if name not in scope.origin:
+                            ep = scope.origin_of(value)
+                            if ep:
+                                scope.origin[name] = ep
+                                changed = True
 
     def _target_names(self, target):
         if isinstance(target, ast.Name):
@@ -433,9 +520,16 @@ class PythonAnalyzer:
     def _emit(self, findings, vuln, node, sink, source, scope):
         line = getattr(node, "lineno", 0)
         code = self._lines[line - 1] if 0 < line <= len(self._lines) else ""
+        ep = None
+        for arg in list(node.args) + [k.value for k in node.keywords]:
+            ep = scope.origin_of(arg)
+            if ep:
+                break
+        param, method = ep or ("", "GET")
         f = Finding(vuln=vuln, file=self._rel, line=line, sink=sink,
                     source=source, framework=self.framework, code=code,
                     column=getattr(node, "col_offset", 0),
+                    param=param, method=method, function=scope.func_name,
                     message=f"Tainted value from {source} reaches {sink}().")
         findings.append(f)
         if self._on_source:

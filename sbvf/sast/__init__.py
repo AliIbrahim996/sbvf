@@ -17,5 +17,7 @@ from __future__ import annotations
 from .model import Finding, VULN_INFO
 from .engine import scan_path, Scanner
 from .bridge import derive_endpoints
+from .routes import extract_routes
 
-__all__ = ["Finding", "VULN_INFO", "scan_path", "Scanner", "derive_endpoints"]
+__all__ = ["Finding", "VULN_INFO", "scan_path", "Scanner", "derive_endpoints",
+           "extract_routes"]

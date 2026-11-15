@@ -9,6 +9,8 @@ Runnable with pytest or `python -m tests.test_sast`.
 """
 import os
 import sys
+import tempfile
+import textwrap
 import threading
 import time
 import unittest
@@ -16,7 +18,7 @@ from http.server import ThreadingHTTPServer
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from sbvf.sast import scan_path, derive_endpoints            # noqa: E402
+from sbvf.sast import scan_path, derive_endpoints, extract_routes  # noqa: E402
 from sbvf.sast.php import PhpAnalyzer                         # noqa: E402
 from sbvf.sast.python_analyzer import PythonAnalyzer          # noqa: E402
 from sbvf.algorithms import ALGORITHMS                        # noqa: E402
@@ -254,6 +256,164 @@ class TestGuidedDynamicConfirmation(unittest.TestCase):
         report = run_external(self.base, eps, runs=1, budget=200,
                               methods={"GA": ALGORITHMS["GA"]})
         self.assertEqual(report[0]["methods"]["GA"]["detections"], 0)
+
+
+def _project(files):
+    """Write {relative path: source} into a fresh temp dir; return the dir object."""
+    tmp = tempfile.TemporaryDirectory()
+    for rel, src in files.items():
+        path = os.path.join(tmp.name, rel)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write(textwrap.dedent(src))
+    return tmp
+
+
+class TestPythonRoutes(unittest.TestCase):
+    """Route recovery for Django urls.py and FastAPI decorators (read statically)."""
+
+    def test_django_sample(self):
+        routes = extract_routes(os.path.join(SAMPLES, "python_django"))
+        r = routes[("views", "profile")][0]
+        self.assertEqual(r.path, "/profile/1/")
+        self.assertEqual(r.path_params, ("uid",))
+
+    def test_fastapi_sample(self):
+        routes = extract_routes(os.path.join(SAMPLES, "python_fastapi"))
+        r = routes[("main", "get_user")][0]
+        self.assertEqual((r.path, r.methods), ("/user", ("GET",)))
+
+    def test_django_include_prefix(self):
+        with _project({
+            "site/urls.py": """
+                from django.urls import path, include
+                urlpatterns = [path("shop/", include("shop.urls"))]
+            """,
+            "shop/urls.py": """
+                from django.urls import path
+                from .views import item
+                urlpatterns = [path("item/<slug:s>/", item)]
+            """,
+            "shop/views.py": "def item(request, s):\n    pass\n",
+        }) as root:
+            r = extract_routes(root)[("shop/views", "item")][0]
+            self.assertEqual(r.path, "/shop/item/1/")
+
+    def test_fastapi_router_prefixes(self):
+        with _project({
+            "main.py": """
+                from fastapi import FastAPI
+                from . import users
+                app = FastAPI()
+                app.include_router(users.router, prefix="/v1")
+            """,
+            "users.py": """
+                from fastapi import APIRouter
+                router = APIRouter(prefix="/users")
+                @router.get("/{uid}/search")
+                def search(uid: int, q: str):
+                    pass
+            """,
+        }) as root:
+            r = extract_routes(root)[("users", "search")][0]
+            self.assertEqual(r.path, "/v1/users/1/search")
+            self.assertEqual(r.path_params, ("uid",))
+
+
+class TestDerivePythonEndpoints(unittest.TestCase):
+    def _derive(self, sample):
+        root = os.path.join(SAMPLES, sample)
+        return derive_endpoints(scan_path(root)["findings"], routes=extract_routes(root))
+
+    def test_django_sample(self):
+        eps, skipped = self._derive("python_django")
+        self.assertEqual({(e.path, e.param, e.vuln) for e in eps},
+                         {("/profile/1/", "name", "sqli"), ("/profile/1/", "name", "xss")})
+        self.assertTrue(any(s["vuln"] == "open_redirect" for s in skipped))
+
+    def test_fastapi_sample(self):
+        eps, _ = self._derive("python_fastapi")
+        self.assertEqual({(e.path, e.param, e.vuln) for e in eps},
+                         {("/user", "name", "sqli"), ("/user", "name", "xss")})
+
+    def test_path_param_is_static_only(self):
+        f = {"vuln": "sqli", "file": "views.py", "framework": "django",
+             "method": "PATH", "param": "uid", "function": "profile",
+             "location": "views.py:3"}
+        eps, skipped = derive_endpoints([f], routes={})
+        self.assertEqual(eps, [])
+        self.assertIn("path segment", skipped[0]["reason"])
+
+    def test_post_only_route_is_static_only(self):
+        with _project({"main.py": """
+            from fastapi import FastAPI
+            from fastapi.responses import HTMLResponse
+            app = FastAPI()
+            @app.post("/echo")
+            def echo(q: str):
+                return HTMLResponse(q)
+        """}) as root:
+            eps, skipped = derive_endpoints(scan_path(root)["findings"],
+                                            routes=extract_routes(root))
+            self.assertEqual(eps, [])
+            self.assertIn("does not accept GET", skipped[0]["reason"])
+
+
+class TestGuidedPythonConfirmation(unittest.TestCase):
+    """End-to-end on Python stacks: a Django/FastAPI project is scanned
+    statically, its route table recovered, and the derived endpoint confirmed by
+    the search against a live server serving those routes."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.srv = ThreadingHTTPServer(("127.0.0.1", 0), app.H)
+        threading.Thread(target=cls.srv.serve_forever, daemon=True).start()
+        time.sleep(0.2)
+        cls.base = f"http://127.0.0.1:{cls.srv.server_address[1]}"
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.srv.shutdown()
+
+    def _confirm(self, files, algo):
+        with _project(files) as root:
+            eps, _ = derive_endpoints(scan_path(root)["findings"],
+                                      routes=extract_routes(root))
+        self.assertEqual(len(eps), 1)
+        report = run_external(self.base, eps, runs=1, budget=200,
+                              methods={algo: ALGORITHMS[algo]})
+        return eps[0], report[0]["methods"][algo]["detections"]
+
+    def test_django_xss_route_confirmed(self):
+        ep, hits = self._confirm({
+            "manage.py": "",
+            "urls.py": """
+                from django.urls import path
+                from . import views
+                urlpatterns = [path("xss/reflect_raw", views.search)]
+            """,
+            "views.py": """
+                from django.http import HttpResponse
+                def search(request):
+                    q = request.GET.get("q")
+                    return HttpResponse("<p>" + q + "</p>")
+            """,
+        }, "GA")
+        self.assertEqual((ep.path, ep.param, ep.vuln), ("/xss/reflect_raw", "q", "xss"))
+        self.assertEqual(hits, 1)
+
+    def test_fastapi_sqli_route_confirmed(self):
+        ep, hits = self._confirm({"main.py": """
+            import sqlite3
+            from fastapi import FastAPI
+            app = FastAPI()
+            @app.get("/sqli/error")
+            def lookup(name: str):
+                cur = sqlite3.connect("x.db").cursor()
+                cur.execute("SELECT * FROM users WHERE name = '" + name + "'")
+        """}, "CS")
+        self.assertEqual((ep.path, ep.param, ep.vuln), ("/sqli/error", "name", "sqli"))
+        self.assertEqual(hits, 1)
 
 
 if __name__ == "__main__":

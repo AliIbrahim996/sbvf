@@ -32,7 +32,7 @@ import urllib.request
 
 from .external import ExternalEndpoint, light_crawl, run_external
 from .oracles import LOCAL_HOSTS, Target
-from .sast import scan_path, derive_endpoints
+from .sast import scan_path, derive_endpoints, extract_routes
 
 
 def _acquire(repo: str, workdir: str) -> str:
@@ -142,7 +142,11 @@ def _sast_endpoints(rundir, web_root=""):
     print("[*] static pass: taint-analyzing the source to discover endpoints...")
     result = scan_path(rundir)
     findings = result["findings"]
-    eps, skipped = derive_endpoints(findings, strip_prefix=web_root)
+    routes = extract_routes(rundir)       # Django urls.py / FastAPI decorators
+    eps, skipped = derive_endpoints(findings, strip_prefix=web_root, routes=routes)
+    print(f"    detected stack       : "
+          + (", ".join(f"{k}={v}" for k, v in result["frameworks"].items() if v) or "none"))
+    print(f"    recovered routes     : {sum(len(v) for v in routes.values())}")
     print(f"    static findings      : {len(findings)}")
     print(f"    search-ready endpoints: {len(eps)}")
     for e in eps:
