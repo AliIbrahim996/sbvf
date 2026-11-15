@@ -1,0 +1,8 @@
+{
+    "name": "sbvf/laravel-sample",
+    "description": "Intentionally vulnerable Laravel sample (academic SAST target).",
+    "require": {
+        "php": "^8.1",
+        "laravel/framework": "^10.0"
+    }
+}
