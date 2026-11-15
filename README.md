@@ -80,9 +80,10 @@ a project's *source code*, detects the language and web framework, taint-tracks
 untrusted user input from sources to dangerous sinks, and reports findings with
 `file:line` precision. It never runs or contacts the application.
 
-Supported stacks: **PHP** (native, Yii, Laravel) and **Python** (native, FastAPI,
-Django). Detected classes include SQL injection, XSS, command/code injection,
-file inclusion, path traversal and open redirect (each mapped to a CWE).
+Supported stacks: **PHP** (native, Yii, Laravel), **Python** (native, FastAPI,
+Django) and **Node.js** (native `http`, Express, NestJS — `.js`/`.ts`). Detected
+classes include SQL injection, XSS, command/code injection, file inclusion, path
+traversal, open redirect and SSRF (each mapped to a CWE).
 
 ```bash
 # scan a bundled sample, a local folder, or clone-scan-remove a remote repo
@@ -104,8 +105,18 @@ Besides Django/FastAPI/PHP, stdlib `http.server` apps are understood too
 headers as sinks) — e.g. scanning `https://github.com/stamparm/DSVW` reports
 SQLi, command/code injection, path traversal, XSS and an open redirect.
 
+For Node.js, `sbvf/sast/js.py` is a JS/TS lexer (template literals, regex
+literals, ASI, decorators, block vs object-literal braces) plus a scoped taint
+analysis: Express `req.query/params/body/files/cookies/headers`, NestJS
+`@Query/@Param/@Body/@Headers/@Req` → `db.query`/`knex.raw`/`$queryRawUnsafe`,
+`child_process.exec`, `eval`/`vm`/`mathjs.eval`/`node-serialize`, `fs.*`,
+`axios`/`fetch`, `res.redirect`, `res.send`, strings returned by Nest handlers,
+and EJS views printing a tainted `res.render` value with unescaped `<%- %>`.
+Scanning `https://github.com/appsecco/dvna` reports its SQLi, command injection,
+math.js and node-serialize RCEs, open redirect and EJS XSS — no false positives.
+
 Every step streams into the dashboard's **Static analysis** tab
-(`python -m ui.server`, then the 🧬 tab). Six intentionally-vulnerable sample
+(`python -m ui.server`, then the 🧬 tab). Eight intentionally-vulnerable sample
 projects live under `testbed/sast_samples/` (one per stack).
 
 ### Static-guided search (run the algorithm on a real codebase)
@@ -134,7 +145,9 @@ findings into search targets:
 | PHP (native) | file-routed: `shop/item.php` + `$_GET['id']` → `/shop/item.php?id=` |
 | Django | `urls.py` `path()` patterns, incl. nested `include()` prefixes (`sbvf/sast/routes.py`) |
 | FastAPI | `@app.get/...` decorators, `APIRouter(prefix=)`, `include_router(prefix=)` |
-| Laravel, Yii, native Python | not recovered → reported as *static-only* |
+| Express | `app.get/post(...)`, `router.route()`, named handlers across `require`/`import`, `app.use('/prefix', router)` mounts |
+| NestJS | `@Controller('x')` + `@Get(':id')`/`@Post()`…, `app.setGlobalPrefix()` |
+| Laravel, Yii, native Python, native Node | not recovered → reported as *static-only* |
 
 Findings that cannot be tested over a GET query (POST bodies, URL path segments,
 command/code injection, unrecoverable routes) are listed as *static-only* with the
@@ -153,9 +166,9 @@ docker compose --profile labs up       # also starts DVWA at http://localhost:80
 
 ```
 sbvf/        framework: individual, fitness, oracles, algorithms, stats, datasets, experiment
-sbvf/sast/   static analyzer: model, detect, php, python_analyzer, engine
+sbvf/sast/   static analyzer: model, detect, php, python_analyzer, js, routes, bridge, repo, engine
 testbed/     intentionally-vulnerable apps (bank, blog, shop, wafapp, authapp) + launcher
-testbed/sast_samples/  vulnerable source projects for the static analyzer (6 stacks)
+testbed/sast_samples/  vulnerable source projects for the static analyzer (8 stacks)
 ui/          real-time dashboard (SSE server + HTML; dynamic + static tabs)
 tests/       unit + integration tests (dynamic + static)
 docs/        thesis chapters (Arabic)
