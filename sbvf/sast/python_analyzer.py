@@ -363,14 +363,14 @@ class PythonAnalyzer:
         # SQL injection
         if last in ("execute", "executemany", "executescript", "raw", "extra",
                     "annotate_raw") or fname in ("connection.execute",):
-            src = dyn_tainted(pos[:1] if last in ("execute", "executemany",
-                                                   "executescript") else pos[:1])
+            src = dyn_tainted(pos[:1])
             if src:
                 return self._emit(findings, "sqli", node, fname, src, scope)
-        if last in ("RawSQL",) or fname.endswith("RawSQL"):
-            if dyn_tainted(pos[:1]):
-                return self._emit(findings, "sqli", node, fname, dyn_tainted(pos[:1]), scope)
-        if last == "text" and fname.split(".")[-1] == "text":   # sqlalchemy text()
+        if last == "RawSQL" or fname.endswith("RawSQL"):
+            src = dyn_tainted(pos[:1])
+            if src:
+                return self._emit(findings, "sqli", node, fname, src, scope)
+        if last == "text":   # sqlalchemy text()
             src = dyn_tainted(pos[:1])
             if src:
                 return self._emit(findings, "sqli", node, fname, src, scope)
@@ -394,9 +394,10 @@ class PythonAnalyzer:
             src = first_tainted(pos[:1])
             if src:
                 return self._emit(findings, "code_injection", node, fname, src, scope)
-        if fname in ("pickle.loads", "yaml.load", "cPickle.loads") and first_tainted(pos[:1]):
-            return self._emit(findings, "code_injection", node, fname,
-                              first_tainted(pos[:1]), scope)
+        if fname in ("pickle.loads", "yaml.load", "cPickle.loads"):
+            src = first_tainted(pos[:1])
+            if src:
+                return self._emit(findings, "code_injection", node, fname, src, scope)
 
         # XSS / HTML response
         if last in ("HttpResponse", "HttpResponseBadRequest", "HTMLResponse",
@@ -416,9 +417,10 @@ class PythonAnalyzer:
             src = first_tainted(pos[:1])
             if src:
                 return self._emit(findings, "path_traversal", node, fname, src, scope)
-        if fname in ("os.remove", "os.unlink") and first_tainted(pos[:1]):
-            return self._emit(findings, "path_traversal", node, fname,
-                              first_tainted(pos[:1]), scope)
+        if fname in ("os.remove", "os.unlink"):
+            src = first_tainted(pos[:1])
+            if src:
+                return self._emit(findings, "path_traversal", node, fname, src, scope)
 
         # SSRF
         if fname in ("requests.get", "requests.post", "requests.put", "requests.delete",

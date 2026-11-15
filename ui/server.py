@@ -75,8 +75,10 @@ class UIHandler(BaseHTTPRequestHandler):
     def _scan_stream(self, qs):
         """Server-Sent Events stream for a static (SAST) source-code scan.
 
-        A ``sample`` key selects a bundled vulnerable project; a ``path`` resolves
-        to any existing local directory (this is a localhost-only research tool).
+        A ``sample`` key selects a bundled vulnerable project; a ``path`` selects
+        a location *inside the project tree* (paths outside it are rejected, so
+        the dashboard cannot be turned into an arbitrary file-disclosure tool
+        even if the UI is bound to a non-local interface).
         """
         sample = qs.get("sample", [""])[0]
         custom = qs.get("path", [""])[0]
@@ -92,6 +94,18 @@ class UIHandler(BaseHTTPRequestHandler):
         self.send_header("Cache-Control", "no-cache")
         self.send_header("Connection", "keep-alive")
         self.end_headers()
+
+        # Containment: the scan target must stay within the project root.
+        root_real = os.path.realpath(ROOT)
+        target_real = os.path.realpath(target)
+        try:
+            inside = os.path.commonpath([root_real, target_real]) == root_real
+        except ValueError:
+            inside = False   # different drive (Windows) -> outside the project
+        if not inside:
+            self._sse("scan_error",
+                      {"message": "path outside the project is not allowed"})
+            return
 
         if not os.path.exists(target):
             self._sse("scan_error", {"message": f"path not found: {target}"})
