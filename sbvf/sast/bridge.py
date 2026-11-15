@@ -24,10 +24,11 @@ parameter:
 * the route must be recoverable:
     - **native PHP** is file-routed: ``shop/item.php`` + ``$_GET['id']`` ->
       ``/shop/item.php?id=``;
-    - **Django / FastAPI** routes are read from ``urls.py`` / route decorators
+    - **Django / FastAPI / Express / NestJS** routes are read from routing code
+      (``urls.py``, decorators, ``app.get``/``app.use``, ``@Controller``/``@Get``)
       by :mod:`sbvf.sast.routes` and matched to the handler that holds the sink;
-    - Laravel / Yii / native Python have no statically-recoverable route table
-      here, so their findings stay static-only.
+    - Laravel / Yii / native Python / native Node have no statically-recoverable
+      route table here, so their findings stay static-only.
 
 These limitations are documented in the thesis as threats to validity.
 """
@@ -44,8 +45,8 @@ DYNAMIC_VULNS = {"xss", "sqli"}
 GET_METHODS = {"GET", "REQUEST"}
 # PHP frameworks whose URL routing is file-based (path == file path).
 FILE_ROUTED_PHP = {"php-native"}
-# Python frameworks whose routes sbvf.sast.routes can recover.
-ROUTED_PY = {"django", "fastapi"}
+# Frameworks whose routes sbvf.sast.routes can recover from routing code.
+ROUTED = {"django", "fastapi", "express", "nestjs"}
 
 
 def _route_for(file_path: str, strip_prefix: str = "") -> str:
@@ -105,7 +106,7 @@ def _resolve(f: dict, strip_prefix: str, routes) -> Tuple[Optional[str], Optiona
     fw = f.get("framework")
     if fw in FILE_ROUTED_PHP:
         return _route_for(f["file"], strip_prefix), None
-    if fw in ROUTED_PY:
+    if fw in ROUTED:
         fn = f.get("function")
         if not fn:
             return None, "sink is not inside a request handler"

@@ -489,5 +489,218 @@ class TestHttpServerApps(unittest.TestCase):
         self.assertEqual(got, [4])
 
 
+# --- Node.js: Express and NestJS ----------------------------------------------------
+
+from sbvf.sast.js import JsAnalyzer, lex                       # noqa: E402
+
+
+class TestExpress(unittest.TestCase):
+    def setUp(self):
+        self.r = scan_path(os.path.join(SAMPLES, "node_express"))
+
+    def test_framework_detected(self):
+        self.assertEqual(self.r["frameworks"]["node"], "express")
+
+    def test_all_planted_found_no_false_positives(self):
+        self.assertEqual(_vulns(self.r), {
+            ("xss", 13), ("command_injection", 17), ("path_traversal", 21),
+            ("open_redirect", 27), ("code_injection", 31),   # app.js
+            ("sqli", 9), ("sqli", 14),                       # routes/users.js
+        })
+
+    def test_param_and_method(self):
+        got = {(f["vuln"], f["line"]): (f["param"], f["method"]) for f in self.r["findings"]}
+        self.assertEqual(got[("sqli", 9)], ("name", "GET"))      # const { name } = req.query
+        self.assertEqual(got[("sqli", 14)], ("id", "PATH"))      # req.params.id
+        self.assertEqual(got[("code_injection", 31)], ("expr", "POST"))
+
+
+class TestNestJS(unittest.TestCase):
+    def setUp(self):
+        self.r = scan_path(os.path.join(SAMPLES, "node_nestjs"))
+
+    def test_framework_detected(self):
+        self.assertEqual(self.r["frameworks"]["node"], "nestjs")
+
+    def test_all_planted_found_no_false_positives(self):
+        got = {(f["vuln"], f["line"], f["function"]) for f in self.r["findings"]}
+        self.assertEqual(got, {("sqli", 14, "search"), ("xss", 19, "greet"),
+                               ("sqli", 24, "findOne"), ("command_injection", 29, "run")})
+
+
+class TestJsLexer(unittest.TestCase):
+    def test_regex_template_and_asi(self):
+        src = textwrap.dedent("""
+            const re = /[}{'"]/g
+            const msg = `a ${ {x: '}'}.x } b`
+            const total = a
+              .filter(Boolean)
+              .length
+            app.get('/x', (req, res) => {
+              res.send(req.query.q)
+            })
+        """)
+        stmts, blocks = lex(src)
+        texts = [s.text for s in stmts if not s.is_header]
+        self.assertTrue(any(t.startswith("const total") and ".length" in t for t in texts))
+        route = [b for b in blocks if b.route]
+        self.assertEqual(route[0].route, ("app", "GET", "/x"))
+        inner = [s for s in stmts if s.text.startswith("res.send")][0]
+        self.assertIs(inner.block, route[0])
+
+    def test_decorators_attach_to_method(self):
+        src = "@Controller('a')\nexport class A {\n  @Get(':id')\n  one(@Param('id') id: string) {\n    return id\n  }\n}\n"
+        _, blocks = lex(src)
+        cls = [b for b in blocks if b.kind == "class"][0]
+        meth = [b for b in blocks if b.name == "one"][0]
+        self.assertEqual(cls.decorators, ["@Controller('a')"])
+        self.assertEqual(meth.decorators, ["@Get(':id')"])
+        self.assertIs(meth.parent, cls)
+
+    def test_scopes_do_not_leak_between_handlers(self):
+        src = ("app.get('/a', (req, res) => { const q = req.query.q; res.send('ok') })\n"
+               "app.get('/b', (req, res) => { const q = 'static'; res.send('<p>' + q) })\n")
+        self.assertEqual(JsAnalyzer("express").analyze("a.js", src), [])
+
+    def test_identifier_inside_string_is_not_a_use(self):
+        src = ("module.exports.bulk = function (req, res) {\n"
+               "  var products = serialize.unserialize(req.files.p.data)\n"
+               "  res.redirect('/app/products')\n"
+               "}\n")
+        got = [(f.vuln, f.line) for f in JsAnalyzer("express").analyze("a.js", src)]
+        self.assertEqual(got, [("code_injection", 2)])      # not the constant redirect
+
+    def test_commonjs_handlers_get_their_own_scope(self):
+        src = ("module.exports.a = function (req, res) { var query = req.body.q }\n"
+               "module.exports.b = function (req, res) { res.send('<p>' + query) }\n")
+        self.assertEqual(JsAnalyzer("express").analyze("a.js", src), [])
+
+    def test_mathjs_and_node_serialize_rce(self):
+        src = ("app.post('/c', (req, res) => { res.json(mathjs.eval(req.body.eqn)) })\n"
+               "app.post('/u', (req, res) => { serialize.unserialize(req.body.blob) })\n")
+        got = {f.vuln for f in JsAnalyzer("express").analyze("a.js", src)}
+        self.assertEqual(got, {"code_injection"})
+
+    def test_ejs_raw_output_vs_escaped(self):
+        with _project({
+            "package.json": '{"dependencies": {"express": "4"}}',
+            "app.js": ("const app = require('express')()\n"
+                       "app.get('/p', (req, res) => {\n"
+                       "  res.render('raw', { output: { term: req.query.q } })\n"
+                       "})\n"
+                       "app.get('/s', (req, res) => {\n"
+                       "  res.render('safe', { output: { term: req.query.q } })\n"
+                       "})\n"),
+            "views/raw.ejs": "<h1>\n  Results: <%- output.term %>\n</h1>\n",
+            "views/safe.ejs": "<h1>Results: <%= output.term %></h1>\n",
+        }) as root:
+            r = scan_path(root)
+            got = [(f["vuln"], f["line"], f["param"]) for f in r["findings"]]
+            self.assertEqual(got, [("xss", 3, "q")])
+            self.assertIn("views/raw.ejs:2", r["findings"][0]["sink"])
+
+    def test_regex_exec_is_not_command_injection(self):
+        src = ("const cp = require('child_process')\n"
+               "app.get('/a', (req, res) => { const m = /(\\d+)/.exec(req.query.q); res.json(m) })\n")
+        self.assertEqual(JsAnalyzer("express").analyze("a.js", src), [])
+
+
+class TestNodeRoutesAndBridge(unittest.TestCase):
+    def _derive(self, sample):
+        root = os.path.join(SAMPLES, sample)
+        return derive_endpoints(scan_path(root)["findings"], routes=extract_routes(root))
+
+    def test_express_mount_prefix(self):
+        routes = extract_routes(os.path.join(SAMPLES, "node_express"))
+        self.assertEqual(routes[("routes/users", "@L7")][0].path, "/users")
+        self.assertEqual(routes[("routes/users", "@L13")][0].path_params, ("id",))
+
+    def test_nest_global_and_controller_prefix(self):
+        routes = extract_routes(os.path.join(SAMPLES, "node_nestjs"))
+        r = routes[("src/users/users.controller", "findOne")][0]
+        self.assertEqual((r.path, r.template), ("/api/users/1", "/api/users/:id"))
+
+    def test_derived_endpoints(self):
+        eps, _ = self._derive("node_express")
+        self.assertEqual({(e.path, e.param, e.vuln) for e in eps},
+                         {("/search", "q", "xss"), ("/users", "name", "sqli")})
+        eps, _ = self._derive("node_nestjs")
+        self.assertEqual({(e.path, e.param, e.vuln) for e in eps},
+                         {("/api/users/search", "name", "sqli"), ("/api/users/greet", "who", "xss")})
+
+    def test_named_handler_in_other_module(self):
+        with _project({
+            "package.json": '{"dependencies": {"express": "4"}}',
+            "app.js": ("const express = require('express')\n"
+                       "const h = require('./handlers')\n"
+                       "const app = express()\n"
+                       "app.get('/find', h.find)\n"),
+            "handlers.js": ("exports.find = (req, res) => {\n"
+                            "  res.send('<b>' + req.query.term + '</b>')\n"
+                            "}\n"),
+        }) as root:
+            eps, _ = derive_endpoints(scan_path(root)["findings"], routes=extract_routes(root))
+            self.assertEqual([(e.path, e.param, e.vuln) for e in eps], [("/find", "term", "xss")])
+
+
+class TestGuidedNodeConfirmation(unittest.TestCase):
+    """End-to-end on Node stacks: Express and NestJS projects are scanned
+    statically, their routes recovered, and the derived endpoints confirmed by
+    the search against a live server serving those routes."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.srv = ThreadingHTTPServer(("127.0.0.1", 0), app.H)
+        threading.Thread(target=cls.srv.serve_forever, daemon=True).start()
+        time.sleep(0.2)
+        cls.base = f"http://127.0.0.1:{cls.srv.server_address[1]}"
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.srv.shutdown()
+        cls.srv.server_close()
+
+    def _confirm(self, files, algo):
+        with _project(files) as root:
+            eps, _ = derive_endpoints(scan_path(root)["findings"],
+                                      routes=extract_routes(root))
+        self.assertEqual(len(eps), 1)
+        report = run_external(self.base, eps, runs=1, budget=200,
+                              methods={algo: ALGORITHMS[algo]})
+        return eps[0], report[0]["methods"][algo]["detections"]
+
+    def test_express_xss_route_confirmed(self):
+        ep, hits = self._confirm({
+            "package.json": '{"dependencies": {"express": "4"}}',
+            "server.js": ("const express = require('express')\n"
+                          "const app = express()\n"
+                          "const xss = express.Router()\n"
+                          "app.use('/xss', xss)\n"
+                          "xss.get('/reflect_raw', (req, res) => {\n"
+                          "  const { q } = req.query\n"
+                          "  res.send(`<p>${q}</p>`)\n"
+                          "})\n"),
+        }, "GA")
+        self.assertEqual((ep.path, ep.param, ep.vuln), ("/xss/reflect_raw", "q", "xss"))
+        self.assertEqual(hits, 1)
+
+    def test_nest_sqli_route_confirmed(self):
+        ep, hits = self._confirm({
+            "package.json": '{"dependencies": {"@nestjs/core": "10"}}',
+            "src/sqli.controller.ts": (
+                "import { Controller, Get, Query } from '@nestjs/common'\n"
+                "@Controller('sqli')\n"
+                "export class SqliController {\n"
+                "  constructor(private readonly db: DataSource) {}\n"
+                "  @Get('error')\n"
+                "  find(@Query('name') name: string) {\n"
+                "    return this.db.query(\"SELECT * FROM users WHERE name = '\" + name + \"'\")\n"
+                "  }\n"
+                "}\n"),
+        }, "CS")
+        self.assertEqual((ep.path, ep.param, ep.vuln), ("/sqli/error", "name", "sqli"))
+        self.assertEqual(hits, 1)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
