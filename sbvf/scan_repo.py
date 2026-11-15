@@ -32,6 +32,7 @@ import urllib.request
 
 from .external import ExternalEndpoint, light_crawl, run_external
 from .oracles import LOCAL_HOSTS, Target
+from .sast import scan_path, derive_endpoints
 
 
 def _acquire(repo: str, workdir: str) -> str:
@@ -77,7 +78,7 @@ def _stop(proc: subprocess.Popen):
 
 
 def scan(repo, start, base, endpoints, runs, budget, keep=False, crawl=True,
-         allow_remote=False):
+         allow_remote=False, from_sast=False, web_root=""):
     host = urllib.parse.urlparse(base).hostname or ""
     if host not in LOCAL_HOSTS and not allow_remote:
         sys.exit(f"[x] base host '{host}' is not local. Pass --allow-remote only for a "
@@ -95,6 +96,12 @@ def scan(repo, start, base, endpoints, runs, budget, keep=False, crawl=True,
     proc = None
     try:
         rundir = _acquire(repo, workdir)
+
+        sast_eps = []
+        if from_sast:
+            sast_eps = _sast_endpoints(rundir, web_root)
+            endpoints = list(endpoints) + sast_eps
+
         print(f"[*] launching: {start}")
         proc = subprocess.Popen(start, shell=True, cwd=rundir)
         if not _wait_up(base):
@@ -122,6 +129,29 @@ def scan(repo, start, base, endpoints, runs, budget, keep=False, crawl=True,
             shutil.rmtree(workdir, ignore_errors=True)
         elif keep:
             print(f"[*] keeping {workdir}")
+
+
+def _sast_endpoints(rundir, web_root=""):
+    """Statically analyze *rundir* and return search-ready injection endpoints.
+
+    This is the static->dynamic bridge: the taint analyzer discovers the request
+    parameters, and the search algorithms (run later) decide which are actually
+    exploitable. Only GET-reachable, file-routed findings become endpoints; the
+    rest are reported as static-only so nothing is silently dropped.
+    """
+    print("[*] static pass: taint-analyzing the source to discover endpoints...")
+    result = scan_path(rundir)
+    findings = result["findings"]
+    eps, skipped = derive_endpoints(findings, strip_prefix=web_root)
+    print(f"    static findings      : {len(findings)}")
+    print(f"    search-ready endpoints: {len(eps)}")
+    for e in eps:
+        print(f"      -> {e.vuln:4} {e.path}?{e.param}=   [{e.note}]")
+    if skipped:
+        print(f"    static-only (not auto-confirmed): {len(skipped)}")
+        for s in skipped[:12]:
+            print(f"      .. {s['vuln']:4} {s['location']}  ({s['reason']})")
+    return eps
 
 
 def _print_report(report):
@@ -152,6 +182,12 @@ def main(argv=None):
     ap.add_argument("--runs", type=int, default=15)
     ap.add_argument("--budget", type=int, default=60)
     ap.add_argument("--no-crawl", action="store_true")
+    ap.add_argument("--from-sast", action="store_true",
+                    help="statically taint-analyze the source to auto-discover "
+                         "injection endpoints, then confirm them with the search")
+    ap.add_argument("--web-root", default="",
+                    help="source subdirectory served as the web root (stripped "
+                         "from file paths when mapping them to URLs, e.g. public)")
     ap.add_argument("--keep", action="store_true")
     ap.add_argument("--allow-remote", action="store_true")
     args = ap.parse_args(argv)
@@ -164,7 +200,8 @@ def main(argv=None):
         endpoints.append(ExternalEndpoint(parts[0], parts[1], parts[2], "vulnerable"))
 
     scan(args.repo, args.start, args.base, endpoints, args.runs, args.budget,
-         keep=args.keep, crawl=not args.no_crawl, allow_remote=args.allow_remote)
+         keep=args.keep, crawl=not args.no_crawl, allow_remote=args.allow_remote,
+         from_sast=args.from_sast, web_root=args.web_root)
 
 
 if __name__ == "__main__":

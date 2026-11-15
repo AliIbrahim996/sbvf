@@ -71,6 +71,8 @@ class Finding:
     code: str = ""                # the offending source line (trimmed)
     message: str = ""             # human-readable explanation
     column: int = 0               # best-effort column of the sink
+    param: str = ""               # the request parameter carrying the taint (e.g. "id")
+    method: str = "GET"           # how the input arrives: GET | POST | REQUEST | COOKIE | ...
 
     @property
     def cwe(self) -> str:

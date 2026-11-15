@@ -64,6 +64,11 @@ INCLUDE_SINKS = re.compile(r"\b(include|require)(_once)?\b")
 CODE_SINKS = re.compile(r"\b(eval|assert|create_function)\s*\(")
 ECHO_SINKS = re.compile(r"\b(echo|print|printf|print_r|vprintf)\b")
 
+# A concrete superglobal access, used to recover the request parameter + method
+# (e.g. $_GET['id'] -> param "id", method "GET") so the dynamic search can target it.
+SUPERGLOBAL_KEY = re.compile(
+    r"\$_(GET|POST|REQUEST|COOKIE)\s*\[\s*['\"]([A-Za-z0-9_\-]+)['\"]")
+
 
 class PhpAnalyzer:
     def __init__(self, framework: str = "php-native"):
@@ -84,6 +89,7 @@ class PhpAnalyzer:
         self._lines = source.splitlines()
         self._on_source = on_source
         tainted = {}            # "$var" -> source description
+        self._origin = {}       # "$var" -> (param, method) of its originating input
         findings: List[Finding] = []
 
         statements = list(self._statements(source))
@@ -103,6 +109,7 @@ class PhpAnalyzer:
                 src = self._taint_in(rhs, tainted)
                 if src and var not in tainted:
                     tainted[var] = src
+                    self._remember_origin(var, rhs)
                     changed = True
                     if on_source:
                         on_source(src, line)
@@ -116,6 +123,37 @@ class PhpAnalyzer:
             self._check_blade(source, tainted, findings)
 
         return findings
+
+    # --- request-parameter recovery (for the SAST-guided dynamic search) ----
+
+    def _remember_origin(self, var: str, rhs: str) -> None:
+        """Record which request parameter/method a tainted var ultimately came from."""
+        if var in self._origin:
+            return
+        ep = self._superglobal_in(rhs)
+        if ep:
+            self._origin[var] = ep
+            return
+        for v2, ep2 in self._origin.items():      # inherit through $a = $b . '...'
+            if re.search(re.escape(v2) + r"\b", rhs):
+                self._origin[var] = ep2
+                return
+
+    def _superglobal_in(self, text: str):
+        """(param, method) for the first concrete superglobal access in *text*, else None."""
+        m = SUPERGLOBAL_KEY.search(text)
+        return (m.group(2), m.group(1)) if m else None
+
+    def _endpoint_for(self, region: str):
+        """Best-effort (param, method) for a tainted sink region: a direct
+        superglobal access, or the recorded origin of a tainted variable."""
+        ep = self._superglobal_in(region)
+        if ep:
+            return ep
+        for var, ep2 in self._origin.items():
+            if re.search(re.escape(var) + r"\b", region):
+                return ep2
+        return ("", "GET")
 
     # --- taint helpers ------------------------------------------------------
 
@@ -187,7 +225,8 @@ class PhpAnalyzer:
             region = self._region_after(stmt, m)
             src = self._taint_in(region, tainted)
             if src and self._is_dynamic(region):
-                return self._emit(findings, "sqli", line, m.group(0).strip("("), src)
+                return self._emit(findings, "sqli", line, m.group(0).strip("("),
+                                  src, region)
 
         # Command injection
         m = CMD_SINKS.search(stmt)
@@ -196,7 +235,7 @@ class PhpAnalyzer:
             src = self._taint_in(region, tainted)
             if src:
                 return self._emit(findings, "command_injection", line,
-                                  m.group(1), src)
+                                  m.group(1), src, region)
 
         # Code injection
         m = CODE_SINKS.search(stmt)
@@ -204,7 +243,8 @@ class PhpAnalyzer:
             region = self._region_after(stmt, m)
             src = self._taint_in(region, tainted)
             if src:
-                return self._emit(findings, "code_injection", line, m.group(1), src)
+                return self._emit(findings, "code_injection", line, m.group(1),
+                                  src, region)
 
         # File inclusion
         m = INCLUDE_SINKS.search(stmt)
@@ -213,7 +253,7 @@ class PhpAnalyzer:
             src = self._taint_in(region, tainted)
             if src and self._is_dynamic(region):
                 return self._emit(findings, "file_inclusion", line,
-                                  m.group(0).strip(), src)
+                                  m.group(0).strip(), src, region)
 
         # XSS (echo/print of tainted output)
         m = ECHO_SINKS.search(stmt)
@@ -221,7 +261,7 @@ class PhpAnalyzer:
             region = stmt[m.end():]
             src = self._taint_in(region, tainted)
             if src:
-                return self._emit(findings, "xss", line, m.group(1), src)
+                return self._emit(findings, "xss", line, m.group(1), src, region)
 
         # Backtick shell execution: `... $var ...`
         if "`" in stmt:
@@ -230,7 +270,7 @@ class PhpAnalyzer:
                 src = self._taint_in(bt.group(1), tainted)
                 if src:
                     return self._emit(findings, "command_injection", line,
-                                      "backticks", src)
+                                      "backticks", src, bt.group(1))
 
     def _region_after(self, stmt, match):
         """Argument region for a call-style sink (balanced parens) or rest of line."""
@@ -260,12 +300,14 @@ class PhpAnalyzer:
             src = self._taint_in(region, tainted) or self._source_desc(region)
             if src:
                 line = source[:mo.start()].count("\n") + 1
-                self._emit(findings, "xss", line, "{!! !!} raw echo", src)
+                self._emit(findings, "xss", line, "{!! !!} raw echo", src, region)
 
-    def _emit(self, findings, vuln, line, sink, source):
+    def _emit(self, findings, vuln, line, sink, source, region=""):
         code = self._lines[line - 1] if 0 < line <= len(self._lines) else ""
+        param, method = self._endpoint_for(region) if region else ("", "GET")
         f = Finding(vuln=vuln, file=self._rel, line=line, sink=sink.strip(),
                     source=source, framework=self.framework, code=code,
+                    param=param, method=method,
                     message=f"Tainted value from {source} reaches {sink.strip()}.")
         findings.append(f)
         if self._on_source:
