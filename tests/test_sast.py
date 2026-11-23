@@ -1197,5 +1197,31 @@ class TestCryptoFailures(unittest.TestCase):
             self.assertFalse([f for f in r["findings"] if f["rule"]], name)
 
 
+class TestCryptoRulePrecision(unittest.TestCase):
+    """Regression tests for the A04 code-review findings: hardcoded-secret must
+    key off real identifier components, not substrings of ordinary names."""
+
+    def _v(self, line):
+        from sbvf.sast.rules import scan_text
+        return [f.vuln for f in scan_text("a.py", line)]
+
+    def test_common_identifiers_not_flagged(self):
+        for line in ("driver = 'postgresql'", "cache_key = 'user:12345'",
+                     "author = 'janedoe2024'", "sort_key = 'created_at'",
+                     "archive = 'backups/2024'", "foreign_key = 'orders.id'",
+                     "message = 'hello there friend'"):
+            self.assertNotIn("hardcoded_secret", self._v(line), line)
+
+    def test_real_secret_names_flagged(self):
+        for line in ("api_key = 'AKIA1234567890'", "SECRET_KEY = 'django-insecure-xyz'",
+                     "password = 'hunter2secret'", "jwt_secret = 'abc123def456'",
+                     "sessionKey = 'abc123def456'"):
+            self.assertIn("hardcoded_secret", self._v(line), line)
+
+    def test_weak_random_bare_key_not_context(self):
+        # a standalone 'key' is no longer enough context for weak-random
+        self.assertNotIn("weak_random", self._v("chosen = random.choice(the_key_list)"))
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

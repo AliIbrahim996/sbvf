@@ -74,22 +74,62 @@ class Rule:
 # A04 - Cryptographic Failures
 # --------------------------------------------------------------------------
 
-_SECRET_WORDS = r"(?:secret|passw(?:or)?d|passwd|pwd|api_?key|apikey|private_?key|token|key|iv|nonce|salt|auth)"
-# identifier containing a secret word, optionally quoted (dict / object keys)
-_SECRET_NAME = r"[\"']?\$?[\w.\-]*?" + _SECRET_WORDS + r"[\w\-]*[\"']?"
+# Candidate = any identifier assigned a string literal; precision is decided in
+# _hardcoded_veto by analysing the identifier's *components* (so a secret word
+# must be a real name part, not a substring of 'driver'/'archive'/'cache_key').
+_SECRET_NAME = r"[\"']?\$?[A-Za-z_][\w.$\-]{0,64}[\"']?"
 _LITERAL = r"(['\"])(?P<val>[^'\"\n]{6,})\1"
 _HARDCODED = [_SECRET_NAME + r"\s*(?:=>|:|(?<![=!<>])=(?!=))\s*" + _LITERAL]
+
+# Identifier components that are unambiguously a secret on their own.
+_SECRET_COMPONENTS = {
+    "secret", "secrets", "password", "passwd", "pwd", "pass", "passphrase",
+    "token", "credential", "credentials", "apikey", "privatekey", "secretkey",
+    "accesskey", "clientsecret", "passphrase",
+}
+# "key" only counts as a secret when qualified by one of these (api_key, private
+# key, session key ...), so cache_key / sort_key / foreign_key are not secrets.
+_KEY_QUALIFIERS = {
+    "api", "private", "secret", "access", "encryption", "encrypt", "signing",
+    "sign", "master", "session", "client", "consumer", "refresh", "aes", "rsa",
+    "hmac", "jwt", "crypto", "app",
+}
 _NOT_SECRET_SUFFIX = re.compile(
     r"(?:url|uri|field|name|header|type|param|label|path|file|endpoint|"
     r"prompt|placeholder|regex|pattern|expiry|ttl|length|size|id|"
     r"cookie|claim|prefix)[\"']?$", re.I)
 
 
+def _components(name: str) -> set:
+    """Lowercase name parts, split on snake/kebab/dot and camelCase boundaries."""
+    out = []
+    for part in re.split(r"[_\-.$]", name):
+        out += re.findall(r"[A-Z]+(?=[A-Z][a-z])|[A-Z]?[a-z]+|[A-Z]+|\d+", part) or [part]
+    return {c.lower() for c in out if c}
+
+
+def _name_is_secret(name: str) -> bool:
+    comps = _components(name)
+    if comps & _SECRET_COMPONENTS:
+        return True
+    if "key" in comps and (comps & _KEY_QUALIFIERS):
+        return True
+    # concatenated spellings a split may not separate (e.g. "mypassword")
+    joined = "".join(comps)
+    return any(w in joined for w in
+               ("password", "passphrase", "apikey", "privatekey", "secretkey",
+                "accesskey", "clientsecret"))
+
+
 def _hardcoded_veto(m: "re.Match") -> bool:
     text = m.group(0)
-    name = re.split(r"\s*(?:=>|:|=)", text, 1)[0].strip(" \"'$")
+    if text.lower().startswith("define"):                     # PHP define('NAME', 'val')
+        dm = re.search(r"['\"]([\w]+)['\"]", text)
+        name = dm.group(1) if dm else ""
+    else:
+        name = re.split(r"\s*(?:=>|:|=)", text, 1)[0].strip(" \"'$")
     val = m.group("val")
-    if _NOT_SECRET_SUFFIX.search(name):
+    if _NOT_SECRET_SUFFIX.search(name) or not _name_is_secret(name):
         return True
     low = val.lower()
     if low.startswith(("http://", "https://", "/", "./", "<", "{{", "${", "%(", "env:")):
@@ -98,8 +138,6 @@ def _hardcoded_veto(m: "re.Match") -> bool:
         return True
     if re.fullmatch(r"[\w\-]+", val) and val.lower() == name.lower():   # 'password': 'password'
         return True
-    if low in ("changeme", "your-key-here", "your_api_key", "xxxxxx", "******"):
-        return False                                           # placeholder secrets still count
     return False
 
 
@@ -161,8 +199,7 @@ RULES: List[Rule] = [
         id="A04-hardcoded-secret", vuln="hardcoded_secret",
         patterns={
             "py": _HARDCODED, "js": _HARDCODED,
-            "php": _HARDCODED + [r"\bdefine\s*\(\s*['\"][\w]*" + _SECRET_WORDS +
-                                 r"[\w]*['\"]\s*,\s*" + _LITERAL],
+            "php": _HARDCODED + [r"\bdefine\s*\(\s*['\"][\w]+['\"]\s*,\s*" + _LITERAL],
         },
         # reading the secret from the environment/config is the safe form
         exclude=r"(?:environ|getenv|process\s*\.\s*env|\$_ENV|\$_SERVER|config\s*\(|"
@@ -181,7 +218,7 @@ RULES: List[Rule] = [
         },
         # only security-relevant uses: the line must deal with a secret-ish value
         require=r"(?:secret|passw(?:or)?d|token|otp|nonce|salt|session|csrf|api_?key|"
-                r"reset|verification|\biv\b|\bkey\b)",
+                r"reset|verification|\biv\b)",
         exclude=r"(?:\bsecrets\s*\.|SystemRandom|random_bytes|random_int|"
                 r"crypto\s*\.\s*(?:randomBytes|randomUUID|getRandomValues)|openssl_random)",
         message="Predictable pseudo-random generator used to produce a token, key or "
