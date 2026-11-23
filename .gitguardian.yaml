@@ -1,0 +1,11 @@
+# GitGuardian configuration.
+#
+# testbed/ holds intentionally-vulnerable sample applications and SAST fixtures
+# (DVWA-style apps and the sast_samples/* used to exercise this project's own
+# analyzer). Any "secrets" there are deliberately fake test values that exist so
+# our scanner has something to detect — they are never real credentials — so
+# secret scanning is disabled for that whole tree to avoid false-positive alerts.
+version: 2
+secret:
+  ignored-paths:
+    - "testbed/**"

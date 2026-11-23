@@ -135,6 +135,61 @@ VULN_INFO = {
             "Prefer unguessable identifiers, but treat them as defense in depth, not the control.",
         ],
     },
+    "weak_crypto": {
+        "cwe": "CWE-327", "severity": "medium", "title": "Weak or Broken Cryptography",
+        "desc": "A weak hash (MD5/SHA-1) or a broken cipher/mode (DES, 3DES, RC4, ECB) is used.",
+        "owner": "Backend / security engineering", "exposure": ["Data", "Accounts"],
+        "impact": "Hashes can be cracked or forged with commodity hardware, and weak "
+                  "ciphers or ECB mode leak plaintext — exposing stored passwords, "
+                  "tokens and confidential data after a database or traffic leak.",
+        "fix": [
+            "Hash passwords with a slow adaptive function (bcrypt, scrypt, Argon2) and a per-user salt.",
+            "Use SHA-256 or stronger (or HMAC-SHA-256) for integrity and signatures.",
+            "Replace DES/3DES/RC4 and ECB with AES-GCM or ChaCha20-Poly1305 using a fresh random nonce.",
+            "Prefer a vetted high-level library (e.g. libsodium, Fernet) over hand-assembled primitives.",
+        ],
+    },
+    "broken_tls": {
+        "cwe": "CWE-295", "severity": "high", "title": "Improper Certificate Validation",
+        "desc": "TLS certificate or hostname verification is disabled for an outbound connection.",
+        "owner": "Backend / platform", "exposure": ["Data", "Accounts", "Systems"],
+        "impact": "Anyone on the network path can impersonate the remote service and read "
+                  "or alter the traffic — stealing credentials, API tokens and data, or "
+                  "injecting malicious responses.",
+        "fix": [
+            "Remove verify=False / rejectUnauthorized:false / VERIFYPEER=false and keep verification on.",
+            "For private CAs or self-signed dev certificates, trust the specific CA bundle instead.",
+            "Keep hostname verification enabled (CURLOPT_SSL_VERIFYHOST=2, check_hostname=True).",
+            "Never set NODE_TLS_REJECT_UNAUTHORIZED=0 outside throwaway local tests.",
+        ],
+    },
+    "hardcoded_secret": {
+        "cwe": "CWE-798", "severity": "high", "title": "Hard-coded Credentials or Key",
+        "desc": "A key, secret, password, token or IV is embedded as a literal in source code.",
+        "owner": "Backend / DevOps", "exposure": ["Accounts", "Data", "Systems"],
+        "impact": "Anyone with read access to the repository, a build artifact or a leaked "
+                  "copy of the code gains the credential — enabling token forgery, "
+                  "decryption of stored data and access to connected services. Rotation "
+                  "requires a code release.",
+        "fix": [
+            "Move secrets to environment variables or a secrets manager (Vault, AWS/GCP Secrets Manager).",
+            "Rotate every secret that was ever committed and purge it from history.",
+            "Generate keys and IVs at runtime with a CSPRNG; never reuse a static IV.",
+            "Add secret scanning (pre-commit / CI) to block new literals.",
+        ],
+    },
+    "weak_random": {
+        "cwe": "CWE-338", "severity": "medium", "title": "Insecure Randomness",
+        "desc": "A non-cryptographic PRNG (random, Math.random, rand/mt_rand/uniqid) generates a secret value.",
+        "owner": "Backend / security engineering", "exposure": ["Accounts", "Data"],
+        "impact": "Tokens, reset links, session ids and keys can be predicted from a few "
+                  "observed outputs, enabling account takeover and forged credentials.",
+        "fix": [
+            "Use a CSPRNG: secrets.token_urlsafe / os.urandom (Python), crypto.randomBytes (Node), random_bytes (PHP).",
+            "Make tokens at least 128 bits long and single-use with an expiry.",
+            "Never derive secrets from time, uniqid() or a seeded generator.",
+        ],
+    },
 }
 
 # Severity ordering for sorting the report (most serious first).
@@ -170,6 +225,8 @@ class Finding:
     param: str = ""               # the request parameter carrying the taint (e.g. "id")
     method: str = "GET"           # how the input arrives: GET | POST | REQUEST | COOKIE | PATH | ...
     function: str = ""            # enclosing function (the request handler), "" at module level
+    rule: str = ""                # pattern-rule id (non-taint findings), "" for taint findings
+    how: str = ""                 # explicit "how it got in" narrative (overrides the taint one)
 
     @property
     def cwe(self) -> str:
@@ -206,6 +263,8 @@ class Finding:
     @property
     def how_in(self) -> str:
         """Per-finding 'how it got in' narrative from this taint path."""
+        if self.how:
+            return self.how
         where = _METHOD_PHRASE.get(self.method, "an untrusted input")
         param = f" '{self.param}'" if self.param else ""
         loc = f" in {self.framework}" if self.framework else ""
