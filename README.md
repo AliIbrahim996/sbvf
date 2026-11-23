@@ -182,6 +182,23 @@ figure — how many statically-reported points the search proves exploitable —
 runs the algorithm
 on real open-source code, not just the benchmark apps.
 
+## Next.js frontend (optional)
+
+A modern React/Next.js client lives in `frontend/`. It reuses the Python SSE API
+(`ui/server.py`) as its backend — the stdlib core is unchanged — and renders the
+live scan stream, the finding cards (how it got in / business impact / how to
+close it) and the PDF export as a React app.
+
+```bash
+python -m ui.server                 # backend API on 127.0.0.1:8080
+cd frontend && npm install && npm run dev   # frontend on http://localhost:3000
+```
+
+`frontend/app/api/[...path]/route.ts` proxies `/api/*` to the Python backend as a
+streaming route handler (so Server-Sent Events are forwarded live); point it at a
+different backend with `SBVF_API_ORIGIN`. The original single-file dashboard at
+`http://127.0.0.1:8080` remains available and needs no build step.
+
 ## Docker
 
 ```bash
