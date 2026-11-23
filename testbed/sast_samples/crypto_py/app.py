@@ -8,7 +8,7 @@ import bcrypt
 import requests
 
 # ---- VULNERABLE -----------------------------------------------------------
-SECRET_KEY = "s3cr3t-hardcoded-key-123"          # hardcoded_secret
+SECRET_KEY = "hardcoded-demo-key"          # hardcoded_secret
 
 
 def hash_password(password):
