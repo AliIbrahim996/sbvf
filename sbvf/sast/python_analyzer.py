@@ -85,6 +85,25 @@ _ATTR_METHOD = {
 _MARKER_METHOD = {"Query": "GET", "Path": "PATH", "Body": "POST", "Form": "POST",
                   "File": "POST", "Cookie": "COOKIE", "Header": "HEADER"}
 
+# --- IDOR (broken object-level access control, OWASP A01) --------------------
+# A request-controlled id reaching a by-id data fetch, in a handler that performs
+# no ownership / authorization check. Decorators that imply an access check:
+IDOR_GUARD_DECORATORS = {"login_required", "permission_required", "user_passes_test",
+                         "staff_member_required", "permission_classes",
+                         "has_permissions", "authenticated"}
+# A real authorization *action* in the handler suppresses its IDOR findings.
+# Only explicit permission calls/exceptions count -- NOT the mere presence of a
+# variable named user/owner/account (those over-suppressed real IDOR before).
+_IDOR_AUTHZ_RE = re.compile(
+    r"\bhas_perm\s*\(|\bhas_object_permission\b|PermissionDenied|self\.get_object\s*\(|"
+    r"\bauthorize\s*\(|\bcheck_object_permissions\b|\bcheck_owner\s*\(|\brequire_\w+\s*\(")
+# Keyword names that scope a query to an owner; when one of these is passed on the
+# fetch itself with a current-user value, the fetch is authorized (not IDOR).
+IDOR_OWNER_KEYS = {"user", "owner", "created_by", "account", "tenant", "author",
+                   "user_id", "owner_id", "created_by_id", "account_id",
+                   "tenant_id", "author_id", "owner_user"}
+_CUR_USER_RE = re.compile(r"\brequest\.user\b|\bcurrent_user\b|self\.request\.user")
+
 
 def _const_str(node) -> Optional[str]:
     if isinstance(node, ast.Constant) and isinstance(node.value, str):
@@ -121,6 +140,7 @@ class _FuncScope:
         self.framework = framework
         self.func_name = func_name
         self.http_handler = http_handler   # method of an http.server RequestHandler
+        self.guarded = False               # handler has an ownership/authz check (IDOR)
         self.tainted = {}   # var name -> human-readable source description
         self.origin = {}    # var name -> (request param, input method)
 
@@ -318,10 +338,39 @@ class PythonAnalyzer:
             if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
                 scope = _FuncScope(self.framework, node.name,
                                    http_handler=id(node) in handler_methods)
+                scope.guarded = self._has_ownership_guard(node)
                 self._seed_params(node, scope)
                 self._fixpoint(node.body, scope)
                 self._collect_sinks(node.body, scope, findings)
         return findings
+
+    def _func_source(self, func) -> str:
+        start = max(0, getattr(func, "lineno", 1) - 1)
+        end = getattr(func, "end_lineno", None) or (start + 60)
+        return "\n".join(self._lines[start:end])
+
+    def _has_ownership_guard(self, func) -> bool:
+        """True if the handler performs a real authorization action (a guard
+        decorator or an explicit permission call), so a by-id fetch inside it is
+        not reported as IDOR. Variable *names* no longer count as a guard."""
+        for d in func.decorator_list:
+            if _name_of(d).split(".")[-1] in IDOR_GUARD_DECORATORS:
+                return True
+        return bool(_IDOR_AUTHZ_RE.search(self._func_source(func)))
+
+    @staticmethod
+    def _call_owner_scoped(node) -> bool:
+        """True if this fetch is scoped to the current user, e.g.
+        ``Order.objects.get(pk=id, user=request.user)`` -- then it is authorized."""
+        for kw in node.keywords:
+            if kw.arg in IDOR_OWNER_KEYS:
+                try:
+                    val = ast.unparse(kw.value)
+                except Exception:
+                    val = ""
+                if _CUR_USER_RE.search(val):
+                    return True
+        return False
 
     # --- taint seeding ------------------------------------------------------
 
@@ -532,6 +581,22 @@ class PythonAnalyzer:
                 src = first_tainted(pos)
                 if src:
                     return self._emit(findings, "command_injection", node, fname, src, scope)
+
+        # IDOR: a request-controlled id reaches a by-id object fetch, and the
+        # handler has no ownership/authorization check. These ORM fetches are
+        # parameterized (not SQLi) but return an object chosen by the caller.
+        if not scope.guarded:
+            recv = fname.rsplit(".", 1)[0] if "." in fname else ""
+            orm_fetch = (
+                last in ("get_object_or_404", "get_list_or_404")
+                or (last in ("get", "filter", "get_or_create", "aget", "afilter",
+                             "aget_or_create") and recv.endswith(".objects"))
+                or last in ("filter_by",)
+                or (last == "get" and recv.endswith(".query")))
+            if orm_fetch and not self._call_owner_scoped(node):
+                src = first_tainted(list(node.args) + [k.value for k in node.keywords])
+                if src:
+                    return self._emit(findings, "idor", node, fname, src, scope)
 
         # Code injection
         if fname in ("eval", "exec") or last in ("eval", "exec"):

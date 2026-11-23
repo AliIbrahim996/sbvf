@@ -83,7 +83,18 @@ untrusted user input from sources to dangerous sinks, and reports findings with
 Supported stacks: **PHP** (native, Yii, Laravel), **Python** (native, FastAPI,
 Django) and **Node.js** (native `http`, Express, NestJS — `.js`/`.ts`). Detected
 classes include SQL injection, XSS, command/code injection, file inclusion, path
-traversal, open redirect and SSRF (each mapped to a CWE).
+traversal, open redirect, SSRF and **IDOR / broken object-level access control**
+(each mapped to a CWE).
+
+IDOR (OWASP **A01**) is found by a different rule from the taint classes: a
+request-controlled id reaching a by-id data fetch (Django `.objects.get`,
+SQLAlchemy `query().get`, Mongoose/Sequelize/TypeORM `findById`/`findOne`,
+Laravel `Model::find`) inside a handler that performs **no ownership or
+authorization check**. Handlers that scope the query to the current user, or
+carry an auth guard/decorator (`@login_required`, `@UseGuards`, `auth()->…`),
+are treated as safe. It is reported statically only — unlike the injection
+classes, the search cannot auto-confirm it (that needs two identities to prove
+cross-owner access).
 
 ```bash
 # scan a bundled sample, a local folder, or clone-scan-remove a remote repo

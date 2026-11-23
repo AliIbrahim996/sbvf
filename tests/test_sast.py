@@ -975,5 +975,136 @@ class TestLiveNodeRunner(unittest.TestCase):
             self._stop(proc, tmp)
 
 
+class TestIDOR(unittest.TestCase):
+    """IDOR (OWASP A01): a request-controlled id reaching a by-id data fetch with
+    no ownership/authorization check. Guarded handlers must not be flagged."""
+
+    def _v(self, fw, src, name="a"):
+        ext = ".py" if fw in ("django", "fastapi", "python-native") else \
+              (".php" if "php" in fw else ".ts" if fw == "nestjs" else ".js")
+        mod = {"django": PythonAnalyzer, "fastapi": PythonAnalyzer,
+               "nestjs": JsAnalyzer, "express": JsAnalyzer, "laravel": PhpAnalyzer}[fw]
+        return [f.vuln for f in mod(fw).analyze(name + ext, textwrap.dedent(src))]
+
+    def test_django_objects_get(self):
+        self.assertIn("idor", self._v("django",
+            "def view(request, oid):\n    o = Order.objects.get(pk=oid)\n    return o\n"))
+
+    def test_django_scoped_is_safe(self):
+        self.assertNotIn("idor", self._v("django",
+            "def view(request, oid):\n    o = Order.objects.get(pk=oid, user=request.user)\n    return o\n"))
+
+    def test_django_decorator_guard_is_safe(self):
+        self.assertNotIn("idor", self._v("django",
+            "@permission_required('x')\ndef view(request, oid):\n    return Order.objects.get(pk=oid)\n"))
+
+    def test_fastapi_sqlalchemy_get(self):
+        self.assertIn("idor", self._v("fastapi",
+            "@app.get('/o/{oid}')\ndef view(oid: int):\n    return session.query(Order).get(oid)\n"))
+
+    def test_express_findbyid(self):
+        self.assertIn("idor", self._v("express",
+            "app.get('/o/:id',(req,res)=>{ res.json(Order.findById(req.params.id)); })\n"))
+
+    def test_express_user_scoped_is_safe(self):
+        self.assertNotIn("idor", self._v("express",
+            "app.get('/o/:id',(req,res)=>{ res.json(Order.findOne({_id:req.params.id,userId:req.user.id})); })\n"))
+
+    def test_nest_useguards_is_safe(self):
+        self.assertNotIn("idor", self._v("nestjs",
+            "@Controller('o')\nexport class C {\n  @UseGuards(AuthGuard)\n  @Get(':id')\n"
+            "  one(@Param('id') id: string){ return this.repo.findOne(id); }\n}\n"))
+
+    def test_nest_unguarded_is_flagged(self):
+        self.assertIn("idor", self._v("nestjs",
+            "@Controller('o')\nexport class C {\n  @Get(':id')\n"
+            "  one(@Param('id') id: string){ return this.repo.findOne(id); }\n}\n"))
+
+    def test_laravel_find(self):
+        self.assertIn("idor", self._v("laravel",
+            "<?php class C { function show(){ $id=request()->input('id'); return Order::findOrFail($id); } }"))
+
+    def test_laravel_auth_is_safe(self):
+        self.assertNotIn("idor", self._v("laravel",
+            "<?php class C { function show(){ $id=request()->input('id'); "
+            "return Order::where('user_id', auth()->id())->findOrFail($id); } }"))
+
+    def test_bundled_django_sample(self):
+        r = scan_path(os.path.join(SAMPLES, "idor_django"))
+        self.assertEqual(r["frameworks"]["python"], "django")
+        self.assertEqual([(f["vuln"], f["line"]) for f in r["findings"]], [("idor", 13)])
+
+    def test_idor_metadata_in_report(self):
+        fs = PythonAnalyzer("django").analyze(
+            "v.py", "def view(request, oid):\n    return Order.objects.get(pk=oid)\n")
+        d = fs[0].to_dict()
+        self.assertEqual(d["cwe"], "CWE-639")
+        self.assertTrue(d["impact"] and d["fix"] and d["how_in"])
+
+    def test_idor_is_static_only(self):
+        # IDOR cannot be auto-confirmed by the search (it needs two identities to
+        # prove cross-owner access), so it is reported statically, never handed to
+        # GA/CS/RS as an endpoint.
+        with _project({
+            "manage.py": "", "urls.py": "from django.urls import path\nfrom . import views\n"
+            "urlpatterns=[path('orders/<int:oid>/', views.get_order)]\n",
+            "views.py": "def get_order(request, oid):\n    return Order.objects.get(pk=oid)\n",
+        }) as root:
+            eps, skipped = derive_endpoints(scan_path(root)["findings"], routes=extract_routes(root))
+            self.assertEqual([e for e in eps if e.vuln == "idor"], [])
+            self.assertTrue(any(s["vuln"] == "idor" for s in skipped))
+
+
+class TestIDORPrecision(unittest.TestCase):
+    """Regression tests for the IDOR guard precision fixes (code-review findings):
+    the guard must reflect a real authorization action or a query scoped to the
+    user, not the mere presence of a common variable name."""
+
+    def _py(self, s):
+        return [f.vuln for f in PythonAnalyzer("django").analyze("v.py", textwrap.dedent(s))]
+
+    def _js(self, s):
+        return [f.vuln for f in JsAnalyzer("express").analyze("a.js", textwrap.dedent(s))]
+
+    def _php(self, s):
+        return [(f.vuln, f.line) for f in PhpAnalyzer("laravel").analyze("C.php", textwrap.dedent(s))]
+
+    def test_py_common_var_name_no_longer_suppresses(self):
+        self.assertIn("idor", self._py(
+            "def view(request, oid):\n    account = oid\n    return Thing.objects.get(pk=oid)\n"))
+
+    def test_py_comparison_no_longer_suppresses(self):
+        self.assertIn("idor", self._py(
+            "def view(request, oid):\n    if user == oid:\n        pass\n    return T.objects.get(pk=oid)\n"))
+
+    def test_py_scoped_fetch_still_safe(self):
+        self.assertNotIn("idor", self._py(
+            "def view(request, oid):\n    return Order.objects.get(pk=oid, user=request.user)\n"))
+
+    def test_js_id_variable_named_userid_is_flagged(self):
+        self.assertIn("idor", self._js(
+            "app.get('/u/:id',(req,res)=>{ const userId=req.params.id; res.json(User.findById(userId)); })\n"))
+
+    def test_js_outer_guard_covers_nested_callback(self):
+        self.assertNotIn("idor", self._js(
+            "app.get('/o/:id',(req,res)=>{ if(!req.user) return res.sendStatus(401);\n"
+            "  db.q((e)=>{ Order.findById(req.params.id); }); })\n"))
+
+    def test_js_scoped_query_is_safe(self):
+        self.assertNotIn("idor", self._js(
+            "app.get('/o/:id',(req,res)=>{ res.json(Order.findOne({_id:req.params.id, userId:req.user.id})); })\n"))
+
+    def test_php_guard_is_per_method(self):
+        got = self._php(
+            "<?php\nclass Ctrl {\n"
+            "  public function show() { $id=request()->input('id'); return Order::findOrFail($id); }\n"
+            "  public function mine() { $id=request()->input('id'); return Order::where('user_id', auth()->id())->findOrFail($id); }\n}\n")
+        self.assertEqual([v for v, _ in got], ["idor"])   # only show(), not mine()
+
+    def test_php_collection_find_not_flagged(self):
+        self.assertEqual(self._php(
+            "<?php class C { function g(){ $id=$_GET['id']; return collect($rows)->find($id); } }"), [])
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
