@@ -36,6 +36,7 @@ SAST_SAMPLES = {
     "node_express": "Node.js (Express)",
     "node_nestjs": "Node.js (NestJS)",
     "idor_django": "IDOR (Django)",
+    "crypto_py": "Crypto failures (Python)",
 }
 SAST_DIR = os.path.join(ROOT, "testbed", "sast_samples")
 

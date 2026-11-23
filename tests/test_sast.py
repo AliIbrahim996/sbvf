@@ -1106,5 +1106,96 @@ class TestIDORPrecision(unittest.TestCase):
             "<?php class C { function g(){ $id=$_GET['id']; return collect($rows)->find($id); } }"), [])
 
 
+class TestCryptoFailures(unittest.TestCase):
+    """OWASP A04: pattern rules fire on the vulnerable sample, not on safe code."""
+
+    def setUp(self):
+        self.r = scan_path(os.path.join(SAMPLES, "crypto_py"))
+        self.src = open(os.path.join(SAMPLES, "crypto_py", "app.py")).read().splitlines()
+
+    def _line(self, needle):
+        return next(i for i, l in enumerate(self.src, 1) if needle in l)
+
+    def test_each_rule_fires_on_vulnerable_code(self):
+        got = _vulns(self.r)
+        self.assertIn(("weak_crypto", self._line("hashlib.md5")), got)
+        self.assertIn(("broken_tls", self._line("verify=False")), got)
+        self.assertIn(("hardcoded_secret", self._line("SECRET_KEY =")), got)
+        self.assertIn(("weak_random", self._line("random.randint")), got)
+
+    def test_safe_counterparts_not_flagged(self):
+        self.assertSetEqual(
+            {v for v, _ in _vulns(self.r)},
+            {"weak_crypto", "broken_tls", "hardcoded_secret", "weak_random"})
+        self.assertEqual(len(self.r["findings"]), 4)        # nothing from the safe block
+
+    def test_metadata(self):
+        f = {x["vuln"]: x for x in self.r["findings"]}
+        self.assertEqual((f["weak_crypto"]["cwe"], f["weak_crypto"]["severity"]), ("CWE-327", "medium"))
+        self.assertEqual((f["broken_tls"]["cwe"], f["broken_tls"]["severity"]), ("CWE-295", "high"))
+        self.assertEqual((f["hardcoded_secret"]["cwe"], f["hardcoded_secret"]["severity"]), ("CWE-798", "high"))
+        self.assertEqual((f["weak_random"]["cwe"], f["weak_random"]["severity"]), ("CWE-338", "medium"))
+        for x in f.values():
+            self.assertTrue(x["fix"] and x["impact"] and x["owner"] and x["exposure"] and x["how_in"])
+
+    def test_streams_finding_steps(self):
+        steps = []
+        scan_path(os.path.join(SAMPLES, "crypto_py"), on_step=steps.append)
+        self.assertEqual(sum(1 for s in steps if s.kind == "finding"), 4)
+
+    def _scan(self, name, code):
+        with tempfile.TemporaryDirectory() as d:
+            with open(os.path.join(d, name), "w") as fh:
+                fh.write(code)
+            return {f["vuln"] for f in scan_path(d)["findings"]}
+
+    def test_python_variants(self):
+        self.assertIn("weak_crypto", self._scan("a.py", "import hashlib\nh = hashlib.sha1(b'x')\n"))
+        self.assertIn("weak_crypto", self._scan("a.py", "c = AES.new(k, AES.MODE_ECB)\n"))
+        self.assertIn("broken_tls", self._scan("a.py", "import ssl\nc = ssl._create_unverified_context()\n"))
+        self.assertIn("weak_random", self._scan("a.py", "import random\ntoken = random.choice('abc')\n"))
+        for safe in ("import hashlib\nh = hashlib.sha256(b'x')\n",
+                     "import os\nPASSWORD = os.environ.get('PW')\n",
+                     "import secrets\ntoken = secrets.token_hex(8)\n",
+                     "import requests\nrequests.get(u, verify=True)\n",
+                     "h = hashlib.md5(b'x', usedforsecurity=False)\n"):
+            self.assertEqual(self._scan("a.py", safe), set(), safe)
+
+    def test_js_variants(self):
+        self.assertIn("weak_crypto", self._scan("a.js", "const h = crypto.createHash('md5').update(p).digest('hex');\n"))
+        self.assertIn("weak_crypto", self._scan("a.js", "const c = crypto.createCipheriv('aes-128-ecb', k, null);\n"))
+        self.assertIn("broken_tls", self._scan("a.js", "const a = new https.Agent({ rejectUnauthorized: false });\n"))
+        self.assertIn("broken_tls", self._scan("a.js", "process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0';\n"))
+        self.assertIn("hardcoded_secret", self._scan("a.js", "const jwtSecret = 'my-super-secret';\n"))
+        self.assertIn("weak_random", self._scan("a.js", "const token = Math.random().toString(36);\n"))
+        for safe in ("const h = crypto.createHash('sha256');\n",
+                     "const jwtSecret = process.env.JWT_SECRET;\n",
+                     "const token = crypto.randomBytes(16).toString('hex');\n",
+                     "const x = Math.random() * 10;\n",
+                     "const a = new https.Agent({ rejectUnauthorized: true });\n"):
+            self.assertEqual(self._scan("a.js", safe), set(), safe)
+
+    def test_php_variants(self):
+        self.assertIn("weak_crypto", self._scan("a.php", "<?php $h = md5($pw);\n"))
+        self.assertIn("weak_crypto", self._scan("a.php", "<?php $h = sha1($pw);\n"))
+        self.assertIn("broken_tls", self._scan("a.php", "<?php curl_setopt($c, CURLOPT_SSL_VERIFYPEER, false);\n"))
+        self.assertIn("broken_tls", self._scan("a.php", "<?php curl_setopt($c, CURLOPT_SSL_VERIFYHOST, 0);\n"))
+        self.assertIn("hardcoded_secret", self._scan("a.php", "<?php $apiKey = 'abcdef123456';\n"))
+        self.assertIn("weak_random", self._scan("a.php", "<?php $token = mt_rand();\n"))
+        self.assertIn("weak_random", self._scan("a.php", "<?php $token = uniqid();\n"))
+        for safe in ("<?php $h = password_hash($pw, PASSWORD_BCRYPT);\n",
+                     "<?php curl_setopt($c, CURLOPT_SSL_VERIFYPEER, true);\n",
+                     "<?php $apiKey = getenv('API_KEY');\n",
+                     "<?php $token = bin2hex(random_bytes(16));\n"):
+            self.assertEqual(self._scan("a.php", safe), set(), safe)
+
+    def test_existing_samples_have_no_crypto_findings(self):
+        for name in os.listdir(SAMPLES):
+            if name == "crypto_py":
+                continue
+            r = scan_path(os.path.join(SAMPLES, name))
+            self.assertFalse([f for f in r["findings"] if f["rule"]], name)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
