@@ -1055,5 +1055,56 @@ class TestIDOR(unittest.TestCase):
             self.assertTrue(any(s["vuln"] == "idor" for s in skipped))
 
 
+class TestIDORPrecision(unittest.TestCase):
+    """Regression tests for the IDOR guard precision fixes (code-review findings):
+    the guard must reflect a real authorization action or a query scoped to the
+    user, not the mere presence of a common variable name."""
+
+    def _py(self, s):
+        return [f.vuln for f in PythonAnalyzer("django").analyze("v.py", textwrap.dedent(s))]
+
+    def _js(self, s):
+        return [f.vuln for f in JsAnalyzer("express").analyze("a.js", textwrap.dedent(s))]
+
+    def _php(self, s):
+        return [(f.vuln, f.line) for f in PhpAnalyzer("laravel").analyze("C.php", textwrap.dedent(s))]
+
+    def test_py_common_var_name_no_longer_suppresses(self):
+        self.assertIn("idor", self._py(
+            "def view(request, oid):\n    account = oid\n    return Thing.objects.get(pk=oid)\n"))
+
+    def test_py_comparison_no_longer_suppresses(self):
+        self.assertIn("idor", self._py(
+            "def view(request, oid):\n    if user == oid:\n        pass\n    return T.objects.get(pk=oid)\n"))
+
+    def test_py_scoped_fetch_still_safe(self):
+        self.assertNotIn("idor", self._py(
+            "def view(request, oid):\n    return Order.objects.get(pk=oid, user=request.user)\n"))
+
+    def test_js_id_variable_named_userid_is_flagged(self):
+        self.assertIn("idor", self._js(
+            "app.get('/u/:id',(req,res)=>{ const userId=req.params.id; res.json(User.findById(userId)); })\n"))
+
+    def test_js_outer_guard_covers_nested_callback(self):
+        self.assertNotIn("idor", self._js(
+            "app.get('/o/:id',(req,res)=>{ if(!req.user) return res.sendStatus(401);\n"
+            "  db.q((e)=>{ Order.findById(req.params.id); }); })\n"))
+
+    def test_js_scoped_query_is_safe(self):
+        self.assertNotIn("idor", self._js(
+            "app.get('/o/:id',(req,res)=>{ res.json(Order.findOne({_id:req.params.id, userId:req.user.id})); })\n"))
+
+    def test_php_guard_is_per_method(self):
+        got = self._php(
+            "<?php\nclass Ctrl {\n"
+            "  public function show() { $id=request()->input('id'); return Order::findOrFail($id); }\n"
+            "  public function mine() { $id=request()->input('id'); return Order::where('user_id', auth()->id())->findOrFail($id); }\n}\n")
+        self.assertEqual([v for v, _ in got], ["idor"])   # only show(), not mine()
+
+    def test_php_collection_find_not_flagged(self):
+        self.assertEqual(self._php(
+            "<?php class C { function g(){ $id=$_GET['id']; return collect($rows)->find($id); } }"), [])
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

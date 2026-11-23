@@ -63,10 +63,12 @@ CMD_SINKS = re.compile(
 INCLUDE_SINKS = re.compile(r"\b(include|require)(_once)?\b")
 CODE_SINKS = re.compile(r"\b(eval|assert|create_function)\s*\(")
 ECHO_SINKS = re.compile(r"\b(echo|print|printf|print_r|vprintf)\b")
-# IDOR (OWASP A01): an Eloquent fetch-by-id on tainted input.
-IDOR_SINKS = re.compile(r"::\s*(findOrFail|find)\s*\(|->\s*(findOrFail|find|firstWhere)\s*\(")
-# An ownership / authorization signal anywhere in the file suppresses IDOR for it
-# (Laravel controllers are small; this favours precision over recall).
+# IDOR (OWASP A01): an Eloquent fetch-by-id on tainted input. Static Model::find
+# is Eloquent; of the arrow forms only the Eloquent-specific names are used, so a
+# Laravel Collection's in-memory ->find() is not mistaken for a DB object fetch.
+IDOR_SINKS = re.compile(r"::\s*(findOrFail|find)\s*\(|->\s*(findOrFail|firstWhere)\s*\(")
+# A real ownership/authorization signal that suppresses IDOR, scoped to the
+# enclosing function (see _guard_ranges) rather than the whole file.
 _PHP_IDOR_GUARD = re.compile(
     r"auth\(\)\s*->|Auth::|\$request->user\(|->where\(\s*['\"](?:user_id|owner_id|owner|user)['\"]|"
     r"\bpolicy\b|->authorize\(|Gate::|->can\(|->middleware\(|->user_id\b")
@@ -121,8 +123,10 @@ class PhpAnalyzer:
                     if on_source:
                         on_source(src, line)
 
-        # Whole-file ownership/authorization signal: suppresses IDOR findings.
-        self._idor_guarded = bool(_PHP_IDOR_GUARD.search(source))
+        # Ownership/authorization signal scoped per function (so one guarded
+        # method does not suppress IDOR in a sibling method of the same file).
+        self._guard_ranges = self._compute_guard_ranges(source)
+        self._file_guarded = bool(_PHP_IDOR_GUARD.search(source))
 
         # Pass 2: check every statement for sink usage of tainted data.
         for line, stmt in statements:
@@ -133,6 +137,40 @@ class PhpAnalyzer:
             self._check_blade(source, tainted, findings)
 
         return findings
+
+    # --- IDOR guard scoping -------------------------------------------------
+
+    def _compute_guard_ranges(self, source: str):
+        """[(start_line, end_line, guarded_bool)] for each PHP function body, so an
+        ownership/authz check in one method does not suppress IDOR in another."""
+        ranges = []
+        for m in re.finditer(r"function\s+\w+\s*\([^)]*\)[^{;]*\{", source):
+            depth, i, n = 0, m.end() - 1, len(source)
+            while i < n:
+                c = source[i]
+                if c == "{":
+                    depth += 1
+                elif c == "}":
+                    depth -= 1
+                    if depth == 0:
+                        break
+                i += 1
+            body = source[m.start():i + 1]
+            start = source.count("\n", 0, m.start()) + 1
+            end = source.count("\n", 0, min(i, n - 1)) + 1
+            ranges.append((start, end, bool(_PHP_IDOR_GUARD.search(body))))
+        return ranges
+
+    def _line_guarded(self, line: int) -> bool:
+        """Whether *line* sits in a guarded function; top-level code falls back to
+        a file-wide signal."""
+        inner = None
+        for start, end, guarded in getattr(self, "_guard_ranges", []):
+            if start <= line <= end and (inner is None or start > inner[0]):
+                inner = (start, guarded)
+        if inner is not None:
+            return inner[1]
+        return getattr(self, "_file_guarded", False)
 
     # --- request-parameter recovery (for the SAST-guided dynamic search) ----
 
@@ -265,8 +303,9 @@ class PhpAnalyzer:
                 return self._emit(findings, "file_inclusion", line,
                                   m.group(0).strip(), src, region)
 
-        # IDOR: Eloquent fetch-by-id on tainted input, no ownership check in file
-        if not getattr(self, "_idor_guarded", False):
+        # IDOR: Eloquent fetch-by-id on tainted input, no ownership check in the
+        # enclosing function (falls back to file scope for top-level code).
+        if not self._line_guarded(line):
             m = IDOR_SINKS.search(stmt)
             if m:
                 region = self._region_after(stmt, m)

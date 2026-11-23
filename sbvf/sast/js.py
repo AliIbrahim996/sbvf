@@ -572,11 +572,15 @@ _RENDER = re.compile(r"\b(?:res|response|resp)\s*\.\s*render\s*\(")
 # IDOR (OWASP A01): a by-id object fetch (Mongoose/Sequelize/TypeORM/Prisma).
 _IDOR = re.compile(
     r"\.\s*(findById|findByPk|findOne|findOneBy|findUnique|findOneByOrFail|getById|findOrFail)\s*\(")
-# An ownership / authorization signal in the handler suppresses its IDOR findings.
-_JS_IDOR_GUARD = re.compile(
-    r"req\.user|req\.session|request\.user|\breq\.auth\b|\.user\.id|\buserId\b|\bownerId\b|"
-    r"\bcurrentUser\b|isAuthenticated|\bauthorize\b|\bability\b|\bcan\s*\(|getUser\s*\(|"
-    r"where\s*:\s*\{[^}]*\b(?:userId|ownerId|owner|user|tenantId)\b")
+# A real authentication/authorization signal in the handler (or an enclosing
+# handler) suppresses its IDOR findings. Note: a bare identifier like `userId` is
+# NOT here -- that is usually the attacker-controlled id, not a guard.
+_JS_HANDLER_GUARD = re.compile(
+    r"req\.user\b|request\.user\b|\breq\.auth\b|req\.isAuthenticated|isAuthenticated\s*\(|"
+    r"\bauthorize\s*\(|\bability\b|\bcan\s*\(|ensureLoggedIn|requireAuth|@UseGuards")
+# An ownership filter on the fetch itself (a query key scoped to the user) means
+# the fetch is authorized, e.g. findOne({ _id: id, userId: req.user.id }).
+_JS_SCOPE_KEY = re.compile(r"\b(?:userId|ownerId|owner|user|tenantId|accountId|createdBy)\s*:")
 _SET_HEADER = re.compile(r"\b(?:res|response|resp)\s*\.\s*(setHeader|set|header|writeHead)\s*\(")
 _XSS = re.compile(
     r"\b(?:res|response|resp)(?:\s*\.\s*(?:status|type|set|header|cookie|vary|append)"
@@ -666,10 +670,21 @@ class JsAnalyzer:
             if cls is not None:
                 decos += cls.decorators
             if any(d.startswith("@UseGuards") for d in decos) \
-                    or _JS_IDOR_GUARD.search(b.header) \
-                    or _JS_IDOR_GUARD.search(text.get(b, "")):
+                    or _JS_HANDLER_GUARD.search(b.header) \
+                    or _JS_HANDLER_GUARD.search(text.get(b, "")):
                 guarded.add(id(b))
         return guarded
+
+    def _idor_guarded(self, block) -> bool:
+        """True if the fetch's own function, or any enclosing function (an outer
+        route handler), performs an auth check -- so a guard in the route handler
+        covers a fetch in a nested callback."""
+        b = block
+        while b is not None:
+            if b.kind == "function" and id(b) in getattr(self, "_guarded", set()):
+                return True
+            b = b.parent
+        return False
 
     # --- server-side templates (EJS) -------------------------------------------
 
@@ -986,11 +1001,13 @@ class JsAnalyzer:
                     and self._taint_in(args[1], sc)
             if hit:
                 return emit("open_redirect", m, "Location header", hit, region)
-        fb = s.block.function() if s.block else None
-        if fb is None or id(fb) not in getattr(self, "_guarded", set()):
+        if not self._idor_guarded(s.block):
             for m in _IDOR.finditer(t):                               # IDOR: by-id fetch, no guard
                 region, args = args_of(m)
-                src = self._taint_in(region, sc) if args else None
+                # a query scoped to the current user (where:{userId:...}) is authorized
+                if not args or _JS_SCOPE_KEY.search(region):
+                    continue
+                src = self._taint_in(region, sc)
                 if src:
                     return emit("idor", m, self._sink_name(m), src, region)
         for m in _XSS.finditer(t):                                    # reflected XSS

@@ -91,13 +91,18 @@ _MARKER_METHOD = {"Query": "GET", "Path": "PATH", "Body": "POST", "Form": "POST"
 IDOR_GUARD_DECORATORS = {"login_required", "permission_required", "user_passes_test",
                          "staff_member_required", "permission_classes",
                          "has_permissions", "authenticated"}
-# Any of these appearing in a handler suppress its IDOR findings (an ownership or
-# authorization check is present). Conservative: favours precision over recall.
-_IDOR_GUARD_RE = re.compile(
-    r"request\.user|self\.request\.user|\bcurrent_user\b|is_authenticated|"
-    r"\b(?:user|owner|created_by|account|tenant)(?:_id)?\s*=|"
-    r"has_perm|has_object_permission|PermissionDenied|get_object\b|"
-    r"\bauthorize\b|check_owner|\bcan_\w+\(")
+# A real authorization *action* in the handler suppresses its IDOR findings.
+# Only explicit permission calls/exceptions count -- NOT the mere presence of a
+# variable named user/owner/account (those over-suppressed real IDOR before).
+_IDOR_AUTHZ_RE = re.compile(
+    r"\bhas_perm\s*\(|\bhas_object_permission\b|PermissionDenied|self\.get_object\s*\(|"
+    r"\bauthorize\s*\(|\bcheck_object_permissions\b|\bcheck_owner\s*\(|\brequire_\w+\s*\(")
+# Keyword names that scope a query to an owner; when one of these is passed on the
+# fetch itself with a current-user value, the fetch is authorized (not IDOR).
+IDOR_OWNER_KEYS = {"user", "owner", "created_by", "account", "tenant", "author",
+                   "user_id", "owner_id", "created_by_id", "account_id",
+                   "tenant_id", "author_id", "owner_user"}
+_CUR_USER_RE = re.compile(r"\brequest\.user\b|\bcurrent_user\b|self\.request\.user")
 
 
 def _const_str(node) -> Optional[str]:
@@ -345,12 +350,27 @@ class PythonAnalyzer:
         return "\n".join(self._lines[start:end])
 
     def _has_ownership_guard(self, func) -> bool:
-        """True if the handler already performs an ownership/authorization check,
-        so a by-id fetch inside it is not reported as IDOR."""
+        """True if the handler performs a real authorization action (a guard
+        decorator or an explicit permission call), so a by-id fetch inside it is
+        not reported as IDOR. Variable *names* no longer count as a guard."""
         for d in func.decorator_list:
             if _name_of(d).split(".")[-1] in IDOR_GUARD_DECORATORS:
                 return True
-        return bool(_IDOR_GUARD_RE.search(self._func_source(func)))
+        return bool(_IDOR_AUTHZ_RE.search(self._func_source(func)))
+
+    @staticmethod
+    def _call_owner_scoped(node) -> bool:
+        """True if this fetch is scoped to the current user, e.g.
+        ``Order.objects.get(pk=id, user=request.user)`` -- then it is authorized."""
+        for kw in node.keywords:
+            if kw.arg in IDOR_OWNER_KEYS:
+                try:
+                    val = ast.unparse(kw.value)
+                except Exception:
+                    val = ""
+                if _CUR_USER_RE.search(val):
+                    return True
+        return False
 
     # --- taint seeding ------------------------------------------------------
 
@@ -573,7 +593,7 @@ class PythonAnalyzer:
                              "aget_or_create") and recv.endswith(".objects"))
                 or last in ("filter_by",)
                 or (last == "get" and recv.endswith(".query")))
-            if orm_fetch:
+            if orm_fetch and not self._call_owner_scoped(node):
                 src = first_tainted(list(node.args) + [k.value for k in node.keywords])
                 if src:
                     return self._emit(findings, "idor", node, fname, src, scope)
