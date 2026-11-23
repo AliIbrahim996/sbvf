@@ -1,0 +1,7 @@
+{
+  "name": "sast-sample-express",
+  "private": true,
+  "description": "Intentionally vulnerable Express app (academic SAST target)",
+  "main": "app.js",
+  "dependencies": { "express": "^4.19.2", "sqlite3": "^5.1.7", "escape-html": "^1.0.3" }
+}
