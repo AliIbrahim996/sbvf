@@ -1,5 +1,5 @@
 "use client";
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { FindingCard } from "@/components/FindingCard";
 import { exportPdf } from "@/lib/pdf";
 import { SAMPLES, type Finding, type ScanResult, type ScanStep } from "@/lib/types";
@@ -29,11 +29,22 @@ export default function Page() {
 
   const highCount = findings.filter((f) => f.severity === "high" || f.severity === "critical").length;
 
+  // Close the stream if the component unmounts mid-scan.
+  useEffect(() => () => esRef.current?.close(), []);
+
   function pushStep(s: { kind: string; text: string }) {
     setSteps((prev) => [...prev, s]);
     requestAnimationFrame(() => {
       if (logRef.current) logRef.current.scrollTop = logRef.current.scrollHeight;
     });
+  }
+
+  function parse<T>(e: Event): T | null {
+    try {
+      return JSON.parse((e as MessageEvent).data) as T;
+    } catch {
+      return null;
+    }
   }
 
   function scan() {
@@ -52,7 +63,8 @@ export default function Page() {
     esRef.current = es;
 
     es.addEventListener("scan_step", (e) => {
-      const d = JSON.parse((e as MessageEvent).data) as ScanStep;
+      const d = parse<ScanStep>(e);
+      if (!d) return;
       pushStep({ kind: d.kind, text: d.text });
       if (d.kind === "detect") {
         setStatus("Scanning…");
@@ -66,17 +78,22 @@ export default function Page() {
       }
     });
     es.addEventListener("scan_done", (e) => {
-      const r = JSON.parse((e as MessageEvent).data) as ScanResult;
-      setResult(r);
-      setFindings(r.findings);
-      setFiles(r.files_scanned);
-      setStatus("Completed");
+      const r = parse<ScanResult>(e);
+      if (r) {
+        setResult(r);
+        setFindings(r.findings);
+        setFiles(r.files_scanned);
+        setStatus("Completed");
+      } else {
+        pushStep({ kind: "error", text: "malformed scan_done from backend" });
+        setStatus("Error");
+      }
       setScanning(false);
       es.close();
     });
     es.addEventListener("scan_error", (e) => {
-      const d = JSON.parse((e as MessageEvent).data) as { message: string };
-      pushStep({ kind: "error", text: d.message });
+      const d = parse<{ message: string }>(e);
+      pushStep({ kind: "error", text: d?.message || "scan error" });
       setStatus("Error");
       setScanning(false);
       es.close();

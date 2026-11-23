@@ -61,26 +61,36 @@ export function exportPdf(scan: ScanResult) {
     <footer>SBVF static analysis · remediation guidance is general and should be reviewed for your context.</footer>
     </body></html>`;
 
-  const frame = document.createElement("iframe");
-  frame.style.cssText = "position:fixed;right:0;bottom:0;width:0;height:0;border:0;opacity:0";
-  document.body.appendChild(frame);
-  const doc = frame.contentWindow!.document;
-  doc.open();
-  doc.write(html);
-  doc.close();
-  setTimeout(() => {
-    try {
-      frame.contentWindow!.focus();
-      frame.contentWindow!.print();
-      setTimeout(() => frame.remove(), 1500);
-    } catch {
-      const blob = new Blob([html], { type: "text/html" });
-      const a = document.createElement("a");
-      a.href = URL.createObjectURL(blob);
-      a.download = "sbvf-report.html";
-      a.click();
-      URL.revokeObjectURL(a.href);
-      frame.remove();
-    }
-  }, 300);
+  const download = () => {
+    const blob = new Blob([html], { type: "text/html" });
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    a.download = "sbvf-report.html";
+    a.click();
+    URL.revokeObjectURL(a.href);
+  };
+
+  let frame: HTMLIFrameElement;
+  try {
+    frame = document.createElement("iframe");
+    frame.style.cssText = "position:fixed;right:0;bottom:0;width:0;height:0;border:0;opacity:0";
+    document.body.appendChild(frame);
+    const win = frame.contentWindow;
+    if (!win) throw new Error("no iframe window");
+    win.document.open();
+    win.document.write(html);
+    win.document.close();
+    setTimeout(() => {
+      try {
+        win.focus();
+        win.print();
+        setTimeout(() => frame.remove(), 1500);
+      } catch {
+        frame.remove();
+        download();
+      }
+    }, 300);
+  } catch {
+    download();
+  }
 }
