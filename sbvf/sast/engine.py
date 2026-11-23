@@ -16,6 +16,7 @@ from .detect import SKIP_DIRS, iter_source_files, detect_frameworks, framework_f
 from .php import PhpAnalyzer
 from .python_analyzer import PythonAnalyzer
 from .js import JsAnalyzer
+from .rules import scan_rules
 
 
 class Scanner:
@@ -86,6 +87,11 @@ class Scanner:
             for f in _template_findings(base, template_flows):
                 findings.append(f)
                 self._report(f)
+
+        self._step("file", "Applying pattern rules (A04 cryptographic failures) ...")
+        for f in scan_rules(root, on_step=self.on_step, files=files,
+                            frameworks=frameworks):
+            findings.append(f)
 
         findings.sort(key=lambda f: (SEVERITY_RANK.get(f.severity, 9),
                                      f.file, f.line))
