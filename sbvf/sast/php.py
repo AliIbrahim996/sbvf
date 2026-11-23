@@ -63,6 +63,13 @@ CMD_SINKS = re.compile(
 INCLUDE_SINKS = re.compile(r"\b(include|require)(_once)?\b")
 CODE_SINKS = re.compile(r"\b(eval|assert|create_function)\s*\(")
 ECHO_SINKS = re.compile(r"\b(echo|print|printf|print_r|vprintf)\b")
+# IDOR (OWASP A01): an Eloquent fetch-by-id on tainted input.
+IDOR_SINKS = re.compile(r"::\s*(findOrFail|find)\s*\(|->\s*(findOrFail|find|firstWhere)\s*\(")
+# An ownership / authorization signal anywhere in the file suppresses IDOR for it
+# (Laravel controllers are small; this favours precision over recall).
+_PHP_IDOR_GUARD = re.compile(
+    r"auth\(\)\s*->|Auth::|\$request->user\(|->where\(\s*['\"](?:user_id|owner_id|owner|user)['\"]|"
+    r"\bpolicy\b|->authorize\(|Gate::|->can\(|->middleware\(|->user_id\b")
 
 # A concrete superglobal access, used to recover the request parameter + method
 # (e.g. $_GET['id'] -> param "id", method "GET") so the dynamic search can target it.
@@ -113,6 +120,9 @@ class PhpAnalyzer:
                     changed = True
                     if on_source:
                         on_source(src, line)
+
+        # Whole-file ownership/authorization signal: suppresses IDOR findings.
+        self._idor_guarded = bool(_PHP_IDOR_GUARD.search(source))
 
         # Pass 2: check every statement for sink usage of tainted data.
         for line, stmt in statements:
@@ -254,6 +264,16 @@ class PhpAnalyzer:
             if src and self._is_dynamic(region):
                 return self._emit(findings, "file_inclusion", line,
                                   m.group(0).strip(), src, region)
+
+        # IDOR: Eloquent fetch-by-id on tainted input, no ownership check in file
+        if not getattr(self, "_idor_guarded", False):
+            m = IDOR_SINKS.search(stmt)
+            if m:
+                region = self._region_after(stmt, m)
+                src = self._taint_in(region, tainted)
+                if src:
+                    return self._emit(findings, "idor", line,
+                                      (m.group(1) or m.group(2)), src, region)
 
         # XSS (echo/print of tainted output)
         m = ECHO_SINKS.search(stmt)

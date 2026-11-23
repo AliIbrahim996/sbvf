@@ -569,6 +569,14 @@ _SSRF = re.compile(
     r"https?\s*\.\s*(?:get|request))\s*\(")
 _REDIRECT = re.compile(r"\b(?:res|response|resp)\s*\.\s*(redirect|location)\s*\(")
 _RENDER = re.compile(r"\b(?:res|response|resp)\s*\.\s*render\s*\(")
+# IDOR (OWASP A01): a by-id object fetch (Mongoose/Sequelize/TypeORM/Prisma).
+_IDOR = re.compile(
+    r"\.\s*(findById|findByPk|findOne|findOneBy|findUnique|findOneByOrFail|getById|findOrFail)\s*\(")
+# An ownership / authorization signal in the handler suppresses its IDOR findings.
+_JS_IDOR_GUARD = re.compile(
+    r"req\.user|req\.session|request\.user|\breq\.auth\b|\.user\.id|\buserId\b|\bownerId\b|"
+    r"\bcurrentUser\b|isAuthenticated|\bauthorize\b|\bability\b|\bcan\s*\(|getUser\s*\(|"
+    r"where\s*:\s*\{[^}]*\b(?:userId|ownerId|owner|user|tenantId)\b")
 _SET_HEADER = re.compile(r"\b(?:res|response|resp)\s*\.\s*(setHeader|set|header|writeHead)\s*\(")
 _XSS = re.compile(
     r"\b(?:res|response|resp)(?:\s*\.\s*(?:status|type|set|header|cookie|vary|append)"
@@ -621,6 +629,7 @@ class JsAnalyzer:
         self._rx_cache: Dict[Tuple[str, ...], tuple] = {}
         stmts, blocks = lex(source)
         self._seed(blocks)
+        self._guarded = self._guarded_handlers(stmts, blocks)
 
         for _ in range(20):                       # propagate to a fixpoint
             changed = False
@@ -637,6 +646,30 @@ class JsAnalyzer:
             self._check(s, findings)
             self._record_render(s)
         return findings
+
+    def _guarded_handlers(self, stmts, blocks):
+        """Function blocks that perform an ownership/authorization check, so a
+        by-id fetch inside them is not reported as IDOR."""
+        text = {}
+        for s in stmts:
+            fb = s.block.function() if s.block else None
+            if fb is not None:
+                text[fb] = text.get(fb, "") + "\n" + s.text
+        guarded = set()
+        for b in blocks:
+            if b.kind != "function":
+                continue
+            decos = list(b.decorators)
+            cls = b.parent
+            while cls is not None and cls.kind != "class":
+                cls = cls.parent
+            if cls is not None:
+                decos += cls.decorators
+            if any(d.startswith("@UseGuards") for d in decos) \
+                    or _JS_IDOR_GUARD.search(b.header) \
+                    or _JS_IDOR_GUARD.search(text.get(b, "")):
+                guarded.add(id(b))
+        return guarded
 
     # --- server-side templates (EJS) -------------------------------------------
 
@@ -953,6 +986,13 @@ class JsAnalyzer:
                     and self._taint_in(args[1], sc)
             if hit:
                 return emit("open_redirect", m, "Location header", hit, region)
+        fb = s.block.function() if s.block else None
+        if fb is None or id(fb) not in getattr(self, "_guarded", set()):
+            for m in _IDOR.finditer(t):                               # IDOR: by-id fetch, no guard
+                region, args = args_of(m)
+                src = self._taint_in(region, sc) if args else None
+                if src:
+                    return emit("idor", m, self._sink_name(m), src, region)
         for m in _XSS.finditer(t):                                    # reflected XSS
             region, args = args_of(m)
             if args and self._xss_arg(args[0], sc):
