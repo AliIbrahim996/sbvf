@@ -6,25 +6,33 @@
 <title>SBVF · Search-Based Vulnerability Framework</title>
 <style>
   :root{
-    --bg:#070b16; --bg2:#0b1222; --panel:#0e1627; --panel2:#111b30;
-    --line:#1e2a44; --line2:#2b3a5c; --txt:#eaf0fb; --muted:#8092b6; --dim:#5a6a8f;
-    --rs:#64748b; --ga:#3b82f6; --cs:#f59e0b; --ok:#2dd4a7; --bad:#fb5a6a;
-    --glow:0 0 0 1px rgba(59,130,246,.25),0 8px 30px -8px rgba(59,130,246,.35);
+    --bg:#060910; --bg2:#0b1222; --panel:#0e1627; --panel2:#111b30;
+    --line:#1e2a44; --line2:#2b3a5c; --txt:#eaf0fb; --muted:#8092b6; --dim:#596a8f;
+    --rs:#64748b; --ga:#3b82f6; --cs:#f59e0b; --ok:#2dd4a7; --bad:#fb5a6a; --warn:#f59e0b;
+    --accent:#6ee7ff; --violet:#8b5cf6;
+    --glow:0 0 0 1px rgba(110,231,255,.18),0 10px 40px -12px rgba(59,130,246,.45);
   }
   *{box-sizing:border-box}
   html,body{margin:0;background:
-    radial-gradient(1100px 600px at 80% -10%,rgba(59,130,246,.10),transparent 60%),
-    radial-gradient(900px 500px at 0% 0%,rgba(245,158,11,.07),transparent 55%),
+    radial-gradient(1200px 640px at 82% -12%,rgba(110,231,255,.10),transparent 60%),
+    radial-gradient(900px 520px at -5% 0%,rgba(139,92,246,.10),transparent 55%),
     var(--bg);
-    color:var(--txt);font:14px/1.55 "Segoe UI",system-ui,Roboto,sans-serif}
+    color:var(--txt);font:14px/1.55 "Segoe UI",system-ui,Roboto,sans-serif;
+    -webkit-font-smoothing:antialiased}
+  body:before{content:"";position:fixed;inset:0;pointer-events:none;z-index:0;opacity:.5;
+    background-image:linear-gradient(rgba(110,231,255,.03) 1px,transparent 1px),
+      linear-gradient(90deg,rgba(110,231,255,.03) 1px,transparent 1px);
+    background-size:46px 46px;mask-image:radial-gradient(1000px 600px at 70% -5%,#000,transparent 70%)}
   a{color:inherit}
-  .shell{max-width:1240px;margin:0 auto;padding:0 22px 60px}
+  .shell{max-width:1240px;margin:0 auto;padding:0 22px 64px;position:relative;z-index:1}
 
-  header{display:flex;align-items:center;gap:16px;padding:22px 2px 20px}
-  .logo{width:42px;height:42px;border-radius:12px;display:grid;place-items:center;
-    background:linear-gradient(135deg,#3b82f6,#8b5cf6);box-shadow:var(--glow);font-size:20px}
-  .brand h1{font-size:19px;margin:0;letter-spacing:.2px;font-weight:700}
-  .brand p{margin:2px 0 0;color:var(--muted);font-size:12.5px}
+  header{display:flex;align-items:center;gap:16px;padding:26px 2px 18px}
+  .logo{width:46px;height:46px;border-radius:13px;display:grid;place-items:center;
+    background:linear-gradient(135deg,#3b82f6,#8b5cf6);box-shadow:var(--glow);font-size:22px}
+  .brand h1{font-size:20px;margin:0;letter-spacing:.2px;font-weight:800;
+    background:linear-gradient(90deg,#eaf0fb,#9fdcff 60%,#c4b5fd);-webkit-background-clip:text;
+    background-clip:text;-webkit-text-fill-color:transparent}
+  .brand p{margin:3px 0 0;color:var(--muted);font-size:12.5px}
   header .spacer{flex:1}
   .legend{display:flex;gap:14px;align-items:center;font-size:12px;color:var(--muted)}
   .legend b{display:inline-flex;align-items:center;gap:6px;font-weight:600}
@@ -33,18 +41,23 @@
 
   .toolbar{display:flex;gap:16px;align-items:flex-end;flex-wrap:wrap;
     background:linear-gradient(180deg,var(--panel2),var(--panel));
-    border:1px solid var(--line);border-radius:16px;padding:18px 18px;margin-bottom:18px;
-    box-shadow:0 12px 40px -22px #000}
+    border:1px solid var(--line);border-radius:16px;padding:18px;margin-bottom:18px;
+    box-shadow:0 18px 50px -30px #000}
   .field{display:flex;flex-direction:column;gap:7px}
   .field label{font-size:11px;text-transform:uppercase;letter-spacing:.08em;color:var(--dim)}
-  select,input[type=number]{appearance:none;background:#0a1120;border:1px solid var(--line2);
+  select,input[type=number],input[type=text]{appearance:none;background:#0a1120;border:1px solid var(--line2);
     color:var(--txt);border-radius:10px;padding:10px 12px;font-size:14px;min-width:120px;outline:none}
-  select:focus,input:focus{border-color:var(--ga);box-shadow:0 0 0 3px rgba(59,130,246,.18)}
+  select:focus,input:focus{border-color:var(--accent);box-shadow:0 0 0 3px rgba(110,231,255,.16)}
   .run-btn{margin-left:auto;background:linear-gradient(135deg,#3b82f6,#6366f1);color:#fff;
     border:0;border-radius:11px;padding:12px 26px;font-size:14.5px;font-weight:700;cursor:pointer;
     box-shadow:0 10px 26px -10px rgba(59,130,246,.8);transition:transform .08s,filter .15s}
   .run-btn:hover{filter:brightness(1.08)} .run-btn:active{transform:translateY(1px)}
   .run-btn:disabled{opacity:.45;cursor:not-allowed;box-shadow:none}
+  .ghost-btn{background:#0c1424;border:1px solid var(--line2);color:var(--txt);border-radius:10px;
+    padding:10px 16px;font-size:13px;font-weight:600;cursor:pointer;display:inline-flex;align-items:center;gap:8px;
+    transition:.15s}
+  .ghost-btn:hover{border-color:var(--accent);color:#cdeffb}
+  .ghost-btn:disabled{opacity:.4;cursor:not-allowed}
 
   .kpis{display:grid;grid-template-columns:repeat(4,1fr);gap:14px;margin-bottom:18px}
   .kpi{background:linear-gradient(180deg,var(--panel2),var(--panel));border:1px solid var(--line);
@@ -53,15 +66,12 @@
   .kpi .big{font-size:30px;font-weight:800;margin-top:6px;font-variant-numeric:tabular-nums}
   .kpi .big small{font-size:14px;color:var(--muted);font-weight:600}
   .kpi.accent:after{content:"";position:absolute;inset:auto -30% -60% auto;width:140px;height:140px;
-    background:radial-gradient(circle,rgba(59,130,246,.35),transparent 60%)}
-
-  .bar-wrap{height:12px;background:#0a1120;border-radius:7px;overflow:hidden;margin-top:10px}
-  .bar-wrap>div{height:100%;width:0;transition:width .25s ease;border-radius:7px}
+    background:radial-gradient(circle,rgba(110,231,255,.28),transparent 60%)}
 
   .grid{display:grid;grid-template-columns:1fr 1fr;gap:16px}
   @media(max-width:860px){.grid{grid-template-columns:1fr}.kpis{grid-template-columns:1fr 1fr}}
   .card{background:linear-gradient(180deg,var(--panel2),var(--panel));border:1px solid var(--line);
-    border-radius:16px;padding:18px;box-shadow:0 12px 40px -26px #000}
+    border-radius:16px;padding:18px;box-shadow:0 14px 44px -30px #000}
   .card h2{font-size:12px;margin:0 0 16px;color:var(--muted);text-transform:uppercase;letter-spacing:.09em;
     display:flex;align-items:center;gap:8px}
   .card h2 .tag{margin-left:auto;font-size:11px;color:var(--dim);text-transform:none;letter-spacing:0}
@@ -78,8 +88,8 @@
   .brow .pc{text-align:right;font-weight:700;font-variant-numeric:tabular-nums;font-size:13px}
 
   .progress{height:8px;background:#0a1120;border-radius:6px;overflow:hidden}
-  .progress>div{height:100%;width:0;background:linear-gradient(90deg,#3b82f6,#f59e0b);
-    transition:width .15s;box-shadow:0 0 14px rgba(59,130,246,.6)}
+  .progress>div{height:100%;width:0;background:linear-gradient(90deg,#3b82f6,#6ee7ff);
+    transition:width .15s;box-shadow:0 0 14px rgba(110,231,255,.6)}
   .pmeta{display:flex;justify-content:space-between;color:var(--muted);font-size:12px;margin-top:8px}
 
   .log{height:290px;overflow:auto;font:12px/1.6 ui-monospace,"Cascadia Code",Consolas,monospace;
@@ -92,8 +102,7 @@
   .b-fp{background:rgba(251,90,106,.14);color:var(--bad)}
   .chip{display:inline-block;padding:0 7px;border-radius:5px;font-weight:700;margin-right:6px}
   .chip.rs{color:var(--rs)}.chip.ga{color:var(--ga)}.chip.cs{color:var(--cs)}
-  .mut{color:var(--dim)}
-  .pl{color:#9fb3d9}
+  .mut{color:var(--dim)} .pl{color:#9fb3d9}
 
   table{width:100%;border-collapse:collapse;font-size:12.5px}
   th,td{text-align:left;padding:9px 10px;border-bottom:1px solid var(--line);white-space:nowrap}
@@ -104,7 +113,6 @@
   .empty{color:var(--dim);text-align:center;padding:26px;font-size:13px}
   footer{margin-top:26px;color:var(--dim);font-size:11.5px;text-align:center}
 
-  /* tabs */
   .tabs{display:flex;gap:8px;margin:6px 2px 18px}
   .tab{background:var(--panel);border:1px solid var(--line);color:var(--muted);
     padding:10px 20px;border-radius:11px;font-size:13.5px;font-weight:600;cursor:pointer;
@@ -114,21 +122,54 @@
     box-shadow:0 8px 22px -12px rgba(59,130,246,.9)}
   section[hidden]{display:none}
 
-  /* severity badges + code */
   .sev{display:inline-block;min-width:62px;text-align:center;padding:2px 9px;border-radius:6px;
     font-weight:700;font-size:11px;letter-spacing:.03em}
+  .sev-critical{background:rgba(190,24,93,.2);color:#fb7185}
   .sev-high{background:rgba(251,90,106,.16);color:var(--bad)}
   .sev-medium{background:rgba(245,158,11,.16);color:var(--cs)}
   .sev-low{background:rgba(100,116,139,.18);color:var(--muted)}
   code.loc{color:#9fb3d9;font:12px ui-monospace,Consolas,monospace}
-  .snip{font:11.5px/1.5 ui-monospace,Consolas,monospace;color:#c3d0ea;background:#070d1a;
-    border-radius:6px;padding:2px 7px;display:inline-block;max-width:340px;overflow:hidden;
-    text-overflow:ellipsis;white-space:nowrap;vertical-align:middle}
-  .b-detect{background:rgba(59,130,246,.14);color:var(--ga)}
+  .b-detect{background:rgba(110,231,255,.14);color:var(--accent)}
   .b-file{background:rgba(100,116,139,.16);color:var(--muted)}
   .b-src{background:rgba(245,158,11,.14);color:var(--cs)}
   .b-find{background:rgba(251,90,106,.16);color:var(--bad)}
   .b-sum{background:rgba(45,212,167,.14);color:var(--ok)}
+
+  /* ---- finding cards ---- */
+  .findings{display:flex;flex-direction:column;gap:12px}
+  .finding{border:1px solid var(--line);border-left:3px solid var(--line2);border-radius:13px;
+    background:linear-gradient(180deg,#0f1930,#0d1526);overflow:hidden;transition:border-color .15s}
+  .finding.sev-high,.finding.sev-critical{border-left-color:var(--bad)}
+  .finding.sev-medium{border-left-color:var(--warn)}
+  .finding.sev-low{border-left-color:var(--rs)}
+  .finding:hover{border-color:var(--line2)}
+  .fhead{display:flex;align-items:center;gap:12px;padding:14px 16px;cursor:pointer;user-select:none}
+  .fhead .ftitle{font-weight:700;font-size:14.5px}
+  .fhead .cwe{color:var(--dim);font-weight:600;font-size:11.5px;margin-left:8px}
+  .fhead .floc{color:#9fb3d9;font:12px ui-monospace,Consolas,monospace}
+  .fhead .faction{margin-left:auto;font-size:11px;color:var(--muted);border:1px solid var(--line2);
+    border-radius:999px;padding:3px 10px;white-space:nowrap}
+  .fhead .chev{color:var(--dim);transition:transform .2s;font-size:12px}
+  .finding.open .chev{transform:rotate(180deg)}
+  .fpath{padding:0 16px 12px;font:12.5px ui-monospace,Consolas,monospace;color:var(--muted)}
+  .fpath .src{color:var(--cs)} .fpath .sink{color:var(--bad)}
+  .fbody{display:none;border-top:1px solid var(--line);padding:4px 16px 16px}
+  .finding.open .fbody{display:block}
+  .panel{padding:14px 0;border-bottom:1px dashed rgba(255,255,255,.06)}
+  .panel:last-child{border-bottom:0}
+  .eyebrow{display:flex;align-items:center;gap:8px;font-size:11px;text-transform:uppercase;
+    letter-spacing:.09em;color:var(--accent);font-weight:700;margin-bottom:9px}
+  .eyebrow.imp{color:var(--warn)} .eyebrow.fix{color:var(--ok)}
+  .panel p{margin:0;color:#d4def2;font-size:13.5px;line-height:1.65}
+  .panel pre{margin:10px 0 0;background:#070d1a;border:1px solid var(--line);border-radius:8px;
+    padding:10px 12px;overflow:auto;font:12px/1.5 ui-monospace,Consolas,monospace;color:#c3d0ea}
+  .panel ol{margin:2px 0 0;padding-left:20px;color:#d4def2;font-size:13.5px;line-height:1.7}
+  .panel ol li{margin:3px 0}
+  .expo{display:flex;gap:7px;flex-wrap:wrap;margin:0 0 10px}
+  .expo span{font-size:11px;font-weight:600;color:#ffd7a0;background:rgba(245,158,11,.12);
+    border:1px solid rgba(245,158,11,.3);border-radius:999px;padding:2px 10px}
+  .owner{font-size:12px;color:var(--muted);margin-bottom:8px}
+  .owner b{color:var(--txt);font-weight:600}
 </style>
 </head>
 <body>
@@ -137,7 +178,7 @@
     <div class="logo">🛡️</div>
     <div class="brand">
       <h1>SBVF&nbsp;·&nbsp;Search-Based Vulnerability Framework</h1>
-      <p>Genetic Algorithm vs Cuckoo Search vs Random Search — live detection on the local benchmark</p>
+      <p>Finds how it got in, what the business stands to lose, and how to close it — statically and by search.</p>
     </div>
     <div class="spacer"></div>
     <div class="legend">
@@ -257,11 +298,15 @@
     </div>
 
     <div class="card">
-      <h2>Findings <span class="tag" id="s-count">0 vulnerabilities</span></h2>
-      <table id="findings"><thead><tr>
-        <th>Severity</th><th>Vulnerability</th><th>CWE</th><th>Location</th>
-        <th>Source → Sink</th><th>Code</th>
-      </tr></thead><tbody><tr><td colspan="6" class="empty">No scan yet. Press Scan to analyze the source code.</td></tr></tbody></table>
+      <h2>Findings
+        <span class="tag" id="s-count">0 vulnerabilities</span>
+        <button class="ghost-btn" id="pdf" style="margin-left:12px" disabled>⬇ Export PDF report</button>
+      </h2>
+      <p style="margin:-6px 0 14px;color:var(--muted);font-size:12.5px">
+        Each finding opens to show <b style="color:var(--accent);font-weight:600">how it got in</b>,
+        <b style="color:var(--warn);font-weight:600">business impact</b>, and
+        <b style="color:var(--ok);font-weight:600">how to close it</b>. Click a card to expand.</p>
+      <div class="findings" id="findings"><div class="empty">No scan yet. Press Scan to analyze the source code.</div></div>
     </div>
   </section>
 
@@ -299,7 +344,7 @@ function drawBars(){
 }
 function esc(s){return (s||"").replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));}
 function logLine(rec){
-  if(!rec.confirmed) return;   // only stream actual confirmations (hits and true false-positives)
+  if(!rec.confirmed) return;
   const log=el("log");
   if(logN===0) log.innerHTML="";
   const atBottom=log.scrollTop+log.clientHeight>=log.scrollHeight-24;
@@ -371,8 +416,8 @@ function showView(v){
 }
 const VTITLE={sqli:"SQL Injection",xss:"Cross-Site Scripting",command_injection:"Command Injection",
   code_injection:"Code Injection",file_inclusion:"File Inclusion",path_traversal:"Path Traversal",
-  open_redirect:"Open Redirect",ssrf:"SSRF"};
-let ses, sFindings;
+  open_redirect:"Open Redirect",ssrf:"SSRF",idor:"Insecure Direct Object Reference"};
+let ses, sFindings, lastScan=null;
 function slog(kind,text){
   const log=el("slog");
   if(log.querySelector(".empty")) log.innerHTML="";
@@ -385,23 +430,41 @@ function slog(kind,text){
   log.appendChild(ln);
   if(atBottom) log.scrollTop=log.scrollHeight;
 }
+function fsteps(list){return (list||[]).map(s=>`<li>${esc(s)}</li>`).join("");}
+function fexpo(list){return (list||[]).map(x=>`<span>${esc(x)}</span>`).join("");}
 function renderFindings(list){
-  const tb=el("findings").querySelector("tbody"); tb.innerHTML="";
-  if(!list.length){tb.innerHTML='<tr><td colspan="6" class="empty">No vulnerabilities found. ✓</td></tr>';return;}
-  for(const f of list){
-    const tr=document.createElement("tr");
-    tr.innerHTML=`<td><span class="sev sev-${f.severity}">${f.severity.toUpperCase()}</span></td>
-      <td>${VTITLE[f.vuln]||f.vuln}</td>
-      <td><span class="pill">${f.cwe}</span></td>
-      <td><code class="loc">${esc(f.location)}</code></td>
-      <td><span class="mut">${esc(f.source)}</span> → <b>${esc(f.sink)}</b></td>
-      <td><span class="snip">${esc((f.code||'').trim())}</span></td>`;
-    tb.appendChild(tr);
-  }
+  const host=el("findings"); host.innerHTML="";
+  if(!list.length){host.innerHTML='<div class="empty">No vulnerabilities found. ✓</div>';return;}
+  list.forEach((f,i)=>{
+    const card=document.createElement("article");
+    card.className="finding sev-"+f.severity;
+    card.innerHTML=`
+      <div class="fhead" onclick="this.parentNode.classList.toggle('open')">
+        <span class="sev sev-${f.severity}">${(f.severity||'').toUpperCase()}</span>
+        <span class="ftitle">${esc(VTITLE[f.vuln]||f.title||f.vuln)}<span class="cwe">${esc(f.cwe||'')}</span></span>
+        <code class="floc">${esc(f.location||'')}</code>
+        <span class="faction">${esc(f.action||'')}</span>
+        <span class="chev">▾</span>
+      </div>
+      <div class="fpath"><span class="src">${esc(f.source||'')}</span> &rarr; <b class="sink">${esc(f.sink||'')}</b></div>
+      <div class="fbody">
+        <div class="panel"><div class="eyebrow">⟐ How it got in</div>
+          <p>${esc(f.how_in||f.message||'')}</p>
+          ${f.code?`<pre>${esc(f.code.trim())}</pre>`:""}</div>
+        <div class="panel"><div class="eyebrow imp">◎ Business impact</div>
+          ${f.exposure&&f.exposure.length?`<div class="expo">${fexpo(f.exposure)}</div>`:""}
+          <p>${esc(f.impact||'')}</p></div>
+        <div class="panel"><div class="eyebrow fix">✓ How to close it</div>
+          <div class="owner">Owner: <b>${esc(f.owner||'Engineering')}</b></div>
+          <ol>${fsteps(f.fix)}</ol></div>
+      </div>`;
+    if(i===0) card.classList.add("open");   // first finding open by default
+    host.appendChild(card);
+  });
 }
 el("scan").onclick=()=>{
   if(ses) ses.close();
-  sFindings=[];
+  sFindings=[]; lastScan=null; el("pdf").disabled=true;
   el("slog").innerHTML=""; el("s-files").textContent="0"; el("s-total").textContent="0";
   el("s-high").textContent="0"; el("s-fw").textContent="…"; el("s-count").textContent="scanning…";
   renderFindings([]);
@@ -421,16 +484,17 @@ el("scan").onclick=()=>{
     if(d.kind==="finding"&&d.data&&d.data.finding){
       sFindings.push(d.data.finding);
       el("s-total").textContent=sFindings.length;
-      el("s-high").textContent=sFindings.filter(x=>x.severity==="high").length;
+      el("s-high").textContent=sFindings.filter(x=>x.severity==="high"||x.severity==="critical").length;
     }
   });
   ses.addEventListener("scan_done",e=>{
-    const r=JSON.parse(e.data);
+    const r=JSON.parse(e.data); lastScan=r;
     el("s-files").textContent=r.files_scanned;
     renderFindings(r.findings);
     el("s-total").textContent=r.findings.length;
-    el("s-high").textContent=(r.counts.by_severity.high||0);
+    el("s-high").textContent=(r.counts.by_severity.high||0)+(r.counts.by_severity.critical||0);
     el("s-count").textContent=r.findings.length+" vulnerabilities";
+    el("pdf").disabled=!r.findings.length;
     el("s-msg").textContent="Completed"; el("scan").disabled=false; ses.close();
   });
   ses.addEventListener("scan_error",e=>{
@@ -440,6 +504,82 @@ el("scan").onclick=()=>{
   });
   ses.onerror=()=>{el("s-msg").textContent="Stream ended"; el("scan").disabled=false; if(ses) ses.close();};
 };
+
+/* ---------------- PDF report (browser print → Save as PDF) ---------------- */
+el("pdf").onclick=()=>{ if(lastScan) exportPDF(lastScan); };
+function exportPDF(scan){
+  const findings=scan.findings||[];
+  const stack=Object.values(scan.frameworks||{}).filter(Boolean).join(", ")||"n/a";
+  const c=scan.counts&&scan.counts.by_severity||{};
+  const when=new Date().toLocaleString();
+  const P=s=>esc(s);
+  const sections=findings.map((f,i)=>`
+    <section class="rf">
+      <h3><span class="rsev s-${f.severity}">${(f.severity||'').toUpperCase()}</span>
+        ${i+1}. ${P(VTITLE[f.vuln]||f.title||f.vuln)} <span class="rcwe">${P(f.cwe||'')}</span></h3>
+      <div class="rmeta"><b>Location:</b> ${P(f.location)} &nbsp;·&nbsp; <b>Path:</b>
+        ${P(f.source)} &rarr; ${P(f.sink)} &nbsp;·&nbsp; <b>Priority:</b> ${P(f.action)}</div>
+      <div class="rb"><div class="rh">How it got in</div><p>${P(f.how_in||f.message)}</p>
+        ${f.code?`<pre>${P(f.code.trim())}</pre>`:""}</div>
+      <div class="rb"><div class="rh">Business impact</div>
+        ${f.exposure&&f.exposure.length?`<p class="rexp">Exposure: ${f.exposure.map(P).join(" · ")}</p>`:""}
+        <p>${P(f.impact)}</p></div>
+      <div class="rb"><div class="rh">How to close it</div>
+        <p class="rown">Owner: ${P(f.owner||'Engineering')}</p>
+        <ol>${(f.fix||[]).map(s=>`<li>${P(s)}</li>`).join("")}</ol></div>
+    </section>`).join("");
+  const html=`<!doctype html><html><head><meta charset="utf-8">
+    <title>SBVF vulnerability report</title><style>
+    *{box-sizing:border-box} body{font:13px/1.6 "Segoe UI",system-ui,Arial,sans-serif;color:#111;margin:32px}
+    h1{font-size:22px;margin:0 0 2px} .sub{color:#555;font-size:12px;margin:0 0 18px}
+    .summary{display:flex;gap:10px;flex-wrap:wrap;margin:0 0 18px}
+    .kc{border:1px solid #ddd;border-radius:8px;padding:8px 14px;min-width:92px}
+    .kc .n{font-size:22px;font-weight:800} .kc .l{font-size:10px;text-transform:uppercase;letter-spacing:.06em;color:#777}
+    .rf{border:1px solid #e2e2e2;border-left:4px solid #999;border-radius:8px;padding:12px 16px;margin:0 0 14px;
+      page-break-inside:avoid}
+    .rf h3{font-size:15px;margin:0 0 6px} .rcwe{color:#888;font-size:11px;font-weight:600}
+    .rsev{display:inline-block;color:#fff;font-size:10px;font-weight:800;border-radius:4px;padding:2px 7px;margin-right:8px;vertical-align:middle}
+    .s-high,.s-critical{background:#d33}.s-medium{background:#e08600}.s-low{background:#777}
+    .rf:has(.s-high),.rf:has(.s-critical){border-left-color:#d33}.rf:has(.s-medium){border-left-color:#e08600}
+    .rmeta{font-size:11.5px;color:#444;margin:0 0 10px;font-family:ui-monospace,Consolas,monospace}
+    .rb{margin:9px 0} .rh{font-size:10.5px;text-transform:uppercase;letter-spacing:.08em;font-weight:800;color:#333;margin:0 0 3px}
+    .rb p{margin:0} .rexp{color:#a15c00;font-weight:600} .rown{color:#555;font-size:12px}
+    pre{background:#f5f6f8;border:1px solid #e2e2e2;border-radius:6px;padding:8px 10px;overflow:auto;
+      font:11px/1.45 ui-monospace,Consolas,monospace;margin:6px 0 0}
+    ol{margin:4px 0 0;padding-left:20px} li{margin:2px 0}
+    footer{margin-top:18px;color:#999;font-size:10.5px;border-top:1px solid #eee;padding-top:8px}
+    @media print{body{margin:14mm}}
+    </style></head><body>
+    <h1>SBVF — Vulnerability Report</h1>
+    <p class="sub">Target: <b>${P(scan.root||'')}</b> · Stack: ${P(stack)} · Files scanned: ${scan.files_scanned||0} · Generated ${P(when)}</p>
+    <div class="summary">
+      <div class="kc"><div class="n">${findings.length}</div><div class="l">Findings</div></div>
+      <div class="kc"><div class="n" style="color:#d33">${(c.critical||0)+(c.high||0)}</div><div class="l">High / Critical</div></div>
+      <div class="kc"><div class="n" style="color:#e08600">${c.medium||0}</div><div class="l">Medium</div></div>
+      <div class="kc"><div class="n" style="color:#777">${c.low||0}</div><div class="l">Low</div></div>
+    </div>
+    ${sections||'<p>No vulnerabilities found.</p>'}
+    <footer>SBVF static analysis · remediation guidance is general and should be reviewed for your context.</footer>
+    </body></html>`;
+  // Print via a hidden iframe (no pop-up, not blocked). The browser's print
+  // dialog offers "Save as PDF". Falls back to downloading a self-contained
+  // .html report if printing is unavailable.
+  const frame=document.createElement("iframe");
+  frame.style.cssText="position:fixed;right:0;bottom:0;width:0;height:0;border:0;opacity:0";
+  document.body.appendChild(frame);
+  const doc=frame.contentWindow.document;
+  doc.open(); doc.write(html); doc.close();
+  const done=()=>{ setTimeout(()=>frame.remove(),1500); };
+  setTimeout(()=>{
+    try{ frame.contentWindow.focus(); frame.contentWindow.print(); done(); }
+    catch(err){
+      const blob=new Blob([html],{type:"text/html"});
+      const a=document.createElement("a");
+      a.href=URL.createObjectURL(blob); a.download="sbvf-report.html"; a.click();
+      URL.revokeObjectURL(a.href); frame.remove();
+    }
+  },300);
+}
 </script>
 </body>
 </html>

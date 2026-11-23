@@ -9,53 +9,149 @@ from dataclasses import dataclass, field, asdict
 from typing import Optional
 
 
-# Canonical vulnerability classes with their CWE id, default severity and a short
-# human description. The analyzers reference these keys so reporting stays uniform.
+# Canonical vulnerability classes. Besides CWE / severity / title / desc, each
+# carries the three remediation panels the dashboard and PDF report render:
+#   impact   -> business impact ("what you'd lose")
+#   fix      -> ordered remediation steps ("how to close it")
+#   owner    -> the team that usually owns the fix
+#   exposure -> what an attacker reaches: Data / Accounts / Systems
+# "How it got in" is composed per finding from its own source -> sink path.
 VULN_INFO = {
     "sqli": {
-        "cwe": "CWE-89", "severity": "high",
-        "title": "SQL Injection",
+        "cwe": "CWE-89", "severity": "high", "title": "SQL Injection",
         "desc": "User input reaches a SQL query without parameterization or escaping.",
+        "owner": "Backend / data access", "exposure": ["Data", "Accounts", "Systems"],
+        "impact": "An attacker can read or modify the whole database — user records, "
+                  "password hashes, orders — bypass authentication, and in some setups "
+                  "run commands on the database host. This is a direct data-breach path.",
+        "fix": [
+            "Use parameterized queries / prepared statements; never concatenate input into SQL.",
+            "With an ORM or query builder, pass values as bound parameters, not raw fragments.",
+            "Validate and type-cast identifiers (e.g. integer ids) before use.",
+            "Apply least-privilege DB accounts so an injection cannot escalate.",
+        ],
     },
     "xss": {
-        "cwe": "CWE-79", "severity": "high",
-        "title": "Cross-Site Scripting (XSS)",
+        "cwe": "CWE-79", "severity": "high", "title": "Cross-Site Scripting (XSS)",
         "desc": "User input is written to an HTML response without output encoding.",
+        "owner": "Frontend / templating", "exposure": ["Accounts", "Data"],
+        "impact": "An attacker can run script in victims' browsers: steal session cookies "
+                  "and tokens, perform actions as the victim, deface pages, or deliver "
+                  "phishing — leading to account takeover.",
+        "fix": [
+            "Output-encode untrusted data for the HTML context (escape < > \" ' &).",
+            "Prefer auto-escaping template constructs; avoid raw/unescaped output.",
+            "Sanitize rich HTML with an allow-list library (e.g. DOMPurify) when markup is needed.",
+            "Add a Content-Security-Policy as defense in depth.",
+        ],
     },
     "command_injection": {
-        "cwe": "CWE-78", "severity": "high",
-        "title": "OS Command Injection",
+        "cwe": "CWE-78", "severity": "high", "title": "OS Command Injection",
         "desc": "User input reaches an operating-system command interpreter.",
+        "owner": "Backend / platform", "exposure": ["Systems", "Data", "Accounts"],
+        "impact": "An attacker can run arbitrary commands on the server with the app's "
+                  "privileges — full host compromise, data theft, lateral movement, and "
+                  "persistence. Among the most severe outcomes possible.",
+        "fix": [
+            "Avoid shelling out; use native library APIs for the task instead.",
+            "If a process must be spawned, pass arguments as a list and disable the shell.",
+            "Never interpolate input into a command string; validate against a strict allow-list.",
+            "Run the service as an unprivileged user and sandbox it.",
+        ],
     },
     "code_injection": {
-        "cwe": "CWE-94", "severity": "high",
-        "title": "Code Injection",
+        "cwe": "CWE-94", "severity": "high", "title": "Code Injection",
         "desc": "User input reaches a dynamic code-evaluation sink (eval/exec).",
+        "owner": "Backend", "exposure": ["Systems", "Data", "Accounts"],
+        "impact": "An attacker can execute arbitrary application code, equivalent to full "
+                  "server compromise — read secrets, alter logic, and pivot to the host.",
+        "fix": [
+            "Remove dynamic evaluation (eval/exec/new Function/deserialization of input).",
+            "Replace with explicit parsing — e.g. a safe JSON/number parser or a dispatch map.",
+            "If templating is needed, use a sandboxed engine with no code execution.",
+        ],
     },
     "file_inclusion": {
-        "cwe": "CWE-98", "severity": "high",
-        "title": "File Inclusion",
+        "cwe": "CWE-98", "severity": "high", "title": "File Inclusion",
         "desc": "User input controls an include/require path.",
+        "owner": "Backend", "exposure": ["Systems", "Data"],
+        "impact": "An attacker can include local or remote files — leaking source and "
+                  "secrets, and often achieving code execution via a planted or remote file.",
+        "fix": [
+            "Never build an include/require path from input.",
+            "Map a request value to an allow-list of known files instead of using it as a path.",
+            "Disable remote includes; resolve and confine paths to an intended base directory.",
+        ],
     },
     "path_traversal": {
-        "cwe": "CWE-22", "severity": "medium",
-        "title": "Path Traversal",
+        "cwe": "CWE-22", "severity": "medium", "title": "Path Traversal",
         "desc": "User input controls a filesystem path passed to a file operation.",
+        "owner": "Backend", "exposure": ["Data"],
+        "impact": "An attacker can read or write files outside the intended directory "
+                  "(e.g. /etc/passwd, config, keys) using ../ sequences, exposing secrets "
+                  "or corrupting files.",
+        "fix": [
+            "Resolve the final path and verify it stays within an allowed base directory.",
+            "Use a safe basename / allow-list of filenames rather than the raw value.",
+            "Reject path separators and traversal sequences in the input.",
+        ],
     },
     "open_redirect": {
-        "cwe": "CWE-601", "severity": "medium",
-        "title": "Open Redirect",
+        "cwe": "CWE-601", "severity": "medium", "title": "Open Redirect",
         "desc": "User input controls a redirect target.",
+        "owner": "Backend / auth", "exposure": ["Accounts"],
+        "impact": "An attacker can send users to an attacker-controlled site from a "
+                  "trusted link — enabling phishing and OAuth/token theft on login flows.",
+        "fix": [
+            "Redirect only to a server-side allow-list of paths or hosts.",
+            "Accept a relative path or a short key that maps to a known URL, not a full URL.",
+            "Reject absolute/scheme-relative targets (http(s):// and //host).",
+        ],
     },
     "ssrf": {
-        "cwe": "CWE-918", "severity": "medium",
-        "title": "Server-Side Request Forgery",
+        "cwe": "CWE-918", "severity": "medium", "title": "Server-Side Request Forgery",
         "desc": "User input controls the URL of an outbound server request.",
+        "owner": "Backend / platform", "exposure": ["Systems", "Data"],
+        "impact": "An attacker can make the server call internal services and cloud "
+                  "metadata endpoints — reaching systems behind the firewall and stealing "
+                  "credentials or internal data.",
+        "fix": [
+            "Allow-list the hosts/schemes the server may call; deny by default.",
+            "Resolve the target and block private, loopback and link-local ranges.",
+            "Disable unneeded protocols and do not follow redirects to blocked hosts.",
+        ],
+    },
+    "idor": {
+        "cwe": "CWE-639", "severity": "high", "title": "Insecure Direct Object Reference (IDOR)",
+        "desc": "A request-supplied object id reaches a data lookup with no ownership or "
+                "access-control check.",
+        "owner": "Backend / auth", "exposure": ["Data", "Accounts"],
+        "impact": "An attacker can read or change other users' records by changing an id "
+                  "in the request — a broken-access-control breach of confidentiality and "
+                  "integrity across accounts.",
+        "fix": [
+            "Enforce an ownership/authorization check on every object access.",
+            "Scope queries to the authenticated user (e.g. WHERE user_id = current_user).",
+            "Prefer unguessable identifiers, but treat them as defense in depth, not the control.",
+        ],
     },
 }
 
 # Severity ordering for sorting the report (most serious first).
-SEVERITY_RANK = {"high": 0, "medium": 1, "low": 2}
+SEVERITY_RANK = {"critical": 0, "high": 1, "medium": 2, "low": 3}
+# Breka-style remediation urgency ladder, by severity.
+SEVERITY_ACTION = {
+    "critical": "Fix before the next release",
+    "high": "Fix this sprint",
+    "medium": "Schedule it",
+    "low": "Track it",
+}
+# How each input method is phrased in the "how it got in" narrative.
+_METHOD_PHRASE = {
+    "GET": "a GET query parameter", "POST": "a POST body field",
+    "REQUEST": "a request parameter", "PATH": "a URL path segment",
+    "COOKIE": "a cookie", "HEADER": "a request header",
+}
 
 
 @dataclass
@@ -87,13 +183,47 @@ class Finding:
     def title(self) -> str:
         return VULN_INFO.get(self.vuln, {}).get("title", self.vuln)
 
+    @property
+    def impact(self) -> str:
+        return VULN_INFO.get(self.vuln, {}).get("impact", "")
+
+    @property
+    def fix(self) -> list:
+        return list(VULN_INFO.get(self.vuln, {}).get("fix", []))
+
+    @property
+    def owner(self) -> str:
+        return VULN_INFO.get(self.vuln, {}).get("owner", "Engineering")
+
+    @property
+    def exposure(self) -> list:
+        return list(VULN_INFO.get(self.vuln, {}).get("exposure", []))
+
+    @property
+    def action(self) -> str:
+        return SEVERITY_ACTION.get(self.severity, "Track it")
+
+    @property
+    def how_in(self) -> str:
+        """Per-finding 'how it got in' narrative from this taint path."""
+        where = _METHOD_PHRASE.get(self.method, "an untrusted input")
+        param = f" '{self.param}'" if self.param else ""
+        loc = f" in {self.framework}" if self.framework else ""
+        handler = f" (handler {self.function})" if self.function else ""
+        return (f"Untrusted input from {self.source} — {where}{param} — flows "
+                f"unsanitized into {self.sink} at {self.location()}{handler}{loc}. "
+                f"Because nothing encodes, validates or parameterizes it on the way, "
+                f"an attacker-controlled value reaches the {self.title} sink.")
+
     def location(self) -> str:
         return f"{self.file}:{self.line}"
 
     def to_dict(self) -> dict:
         d = asdict(self)
         d.update(cwe=self.cwe, severity=self.severity, title=self.title,
-                 location=self.location())
+                 location=self.location(), impact=self.impact, fix=self.fix,
+                 owner=self.owner, exposure=self.exposure, action=self.action,
+                 how_in=self.how_in)
         return d
 
     def __str__(self) -> str:
