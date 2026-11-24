@@ -40,6 +40,7 @@ SAST_SAMPLES = {
     "idor_django": "IDOR (Django)",
     "crypto_py": "Crypto failures (Python)",
     "misconfig_py": "Security misconfig (Python)",
+    "deser_py": "Insecure deserialization (Python)",
 }
 SAST_DIR = os.path.join(ROOT, "testbed", "sast_samples")
 

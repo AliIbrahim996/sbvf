@@ -1310,5 +1310,97 @@ class TestSecurityMisconfig(unittest.TestCase):
                 [f for f in r["findings"] if f["vuln"] in misconfig_vulns], name)
 
 
+class TestInsecureDeserialization(unittest.TestCase):
+    """OWASP A08: deserialization pattern rules fire on the vulnerable sample,
+    not on the hardened counterpart."""
+
+    def setUp(self):
+        self.r = scan_path(os.path.join(SAMPLES, "deser_py"))
+        self.src = open(os.path.join(SAMPLES, "deser_py", "app.py")).read().splitlines()
+
+    def _line(self, needle):
+        return next(i for i, l in enumerate(self.src, 1) if needle in l)
+
+    def test_each_sink_fires_on_vulnerable_code(self):
+        got = _vulns(self.r)
+        self.assertIn(("insecure_deserialization", self._line("pickle.loads")), got)
+        self.assertIn(("insecure_deserialization", self._line("marshal.loads")), got)
+        self.assertIn(("insecure_deserialization", self._line("yaml.load(")), got)
+
+    def test_only_deserialization_findings(self):
+        self.assertSetEqual({v for v, _ in _vulns(self.r)}, {"insecure_deserialization"})
+        self.assertEqual(len(self.r["findings"]), 3)        # nothing from safe.py
+
+    def test_safe_counterpart_not_flagged(self):
+        from sbvf.sast.rules import scan_text
+        safe = open(os.path.join(SAMPLES, "deser_py", "safe.py")).read()
+        self.assertEqual([f.vuln for f in scan_text("safe.py", safe)], [])
+
+    def test_metadata(self):
+        f = next(x for x in self.r["findings"] if x["vuln"] == "insecure_deserialization")
+        self.assertEqual((f["cwe"], f["severity"]), ("CWE-502", "high"))
+        self.assertTrue(f["fix"] and f["impact"] and f["owner"] and f["exposure"] and f["how_in"])
+
+    def test_streams_finding_steps(self):
+        steps = []
+        scan_path(os.path.join(SAMPLES, "deser_py"), on_step=steps.append)
+        self.assertEqual(sum(1 for s in steps if s.kind == "finding"), 3)
+
+    def _scan(self, name, code):
+        with tempfile.TemporaryDirectory() as d:
+            with open(os.path.join(d, name), "w") as fh:
+                fh.write(code)
+            return {f["vuln"] for f in scan_path(d)["findings"]}
+
+    def test_python_variants(self):
+        self.assertIn("insecure_deserialization", self._scan("a.py", "import pickle\nx = pickle.load(fh)\n"))
+        self.assertIn("insecure_deserialization", self._scan("a.py", "import cPickle\nx = cPickle.loads(b)\n"))
+        self.assertIn("insecure_deserialization", self._scan("a.py", "import marshal\nx = marshal.loads(b)\n"))
+        self.assertIn("insecure_deserialization", self._scan("a.py", "import jsonpickle\nx = jsonpickle.decode(s)\n"))
+        self.assertIn("insecure_deserialization", self._scan("a.py", "import yaml\nx = yaml.load(s)\n"))
+        self.assertIn("insecure_deserialization", self._scan("a.py", "import yaml\nx = yaml.unsafe_load(s)\n"))
+        self.assertIn("insecure_deserialization", self._scan("a.py", "import yaml\nx = yaml.load_all(s)\n"))
+        for safe in ("import json\nx = json.loads(s)\n",
+                     "import yaml\nx = yaml.safe_load(s)\n",
+                     "import yaml\nx = yaml.safe_load_all(s)\n",
+                     "import yaml\nx = yaml.load(s, Loader=yaml.SafeLoader)\n",
+                     "import yaml\nx = yaml.load(s, Loader=yaml.BaseLoader)\n"):
+            self.assertEqual(self._scan("a.py", safe), set(), safe)
+
+    def test_php_variants(self):
+        self.assertIn("insecure_deserialization", self._scan("a.php", "<?php $o = unserialize($_POST['d']);\n"))
+        self.assertIn("insecure_deserialization", self._scan("a.php", "<?php $o = yaml_parse($data);\n"))
+        for safe in ("<?php $o = json_decode($_POST['d'], true);\n",
+                     "<?php $o = unserialize($d, ['allowed_classes' => false]);\n"):
+            self.assertEqual(self._scan("a.php", safe), set(), safe)
+
+    def test_js_variants(self):
+        self.assertIn("insecure_deserialization",
+                      self._scan("a.js", "const serialize = require('node-serialize');\nconst o = serialize.unserialize(p);\n"))
+        for safe in ("const o = JSON.parse(p);\n",
+                     "const o = serialize.serialize(p);\n",
+                     # an unrelated in-house unserialize() must not be flagged
+                     "const o = myCache.unserialize(row);\n"):
+            self.assertEqual(self._scan("a.js", safe), set(), safe)
+
+    def test_precision(self):
+        from sbvf.sast.rules import scan_text
+        # a method literally named *.unserialize on an unrelated object should not
+        # drag in Python/PHP patterns, and JSON parsing is always safe
+        self.assertNotIn("insecure_deserialization",
+                         [f.vuln for f in scan_text("a.py", "data = json.loads(request.body)")])
+        # yaml.loader attribute access (not a .load( call) is not a finding
+        self.assertNotIn("insecure_deserialization",
+                         [f.vuln for f in scan_text("a.py", "L = yaml.loader.SafeLoader")])
+
+    def test_existing_samples_have_no_deser_findings(self):
+        for name in os.listdir(SAMPLES):
+            if name == "deser_py":
+                continue
+            r = scan_path(os.path.join(SAMPLES, name))
+            self.assertFalse(
+                [f for f in r["findings"] if f["vuln"] == "insecure_deserialization"], name)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

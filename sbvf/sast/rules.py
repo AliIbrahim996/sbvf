@@ -283,6 +283,43 @@ RULES: List[Rule] = [
         },
         message="Insecure configuration (wildcard ALLOWED_HOSTS, verbose error "
                 "display, or server fingerprint exposure) that eases attacks."),
+
+    # ----------------------------------------------------------------------
+    # A08 - Software and Data Integrity Failures
+    # ----------------------------------------------------------------------
+    Rule(
+        id="A08-insecure-deserialization", vuln="insecure_deserialization",
+        patterns={
+            "py": [r"\b_?c?pickle\s*\.\s*loads?\s*\(",
+                   r"\bmarshal\s*\.\s*loads?\s*\(",
+                   r"\b(?:dill|jsonpickle)\s*\.\s*(?:loads?|decode)\s*\("],
+            "php": [r"(?<![\w>:$])unserialize\s*\("],
+            # node-serialize / funcster rebuild functions from the payload. Require
+            # a serialize-named receiver (serialize.unserialize / serializer.unserialize)
+            # so an unrelated in-house `foo.unserialize()` is not flagged.
+            "js": [r"\b[\w$]*serial[\w$]*\s*\.\s*unserialize\s*\(",
+                   r"\bfuncster\s*\.\s*deepDeserialize\s*\("],
+        },
+        # PHP 7+ unserialize($d, ['allowed_classes' => false]) blocks object
+        # instantiation — that is the hardened form, not a finding.
+        exclude=r"allowed_classes['\"]?\s*(?:=>|:)\s*(?:false|\[)",
+        message="Untrusted data is deserialized with a code-bearing format "
+                "(pickle/marshal/unserialize/node-serialize); a crafted payload can "
+                "instantiate arbitrary objects and execute code while decoding."),
+    Rule(
+        id="A08-unsafe-yaml-load", vuln="insecure_deserialization",
+        patterns={
+            "py": [r"\byaml\s*\.\s*(?:unsafe_load|load_all|load)\s*\("],
+            "php": [r"(?<![\w>:$])yaml_parse\s*\("],
+            "js": [],
+        },
+        # yaml.load(x, Loader=SafeLoader/BaseLoader) and yaml.safe_load[_all] are
+        # the safe forms (FullLoader is deliberately NOT excluded — it has had
+        # object-construction holes). The (?<!un) guard keeps 'unsafe_load' — which
+        # contains the substring 'safe_load' — from excluding itself.
+        exclude=r"SafeLoader|BaseLoader|(?<!un)safe_load",
+        message="YAML is parsed with a full (unsafe) loader; the document can construct "
+                "arbitrary objects. Use yaml.safe_load / Loader=SafeLoader."),
 ]
 
 
