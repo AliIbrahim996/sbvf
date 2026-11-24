@@ -1582,8 +1582,21 @@ class TestSupplyChain(unittest.TestCase):
         # == / ~= pins, https url, and comments are not flagged
         for safe in ("flask==2.3.3\n", "django~=4.2\n",
                      "requests @ https://example.com/r-2.0.tar.gz\n",
-                     "--index-url https://pypi.local/simple\n", "# just a comment\n"):
+                     "--index-url https://pypi.local/simple\n", "# just a comment\n",
+                     # a URL in a TRAILING comment is not the dependency source (review regression)
+                     "requests==2.0  # see http://docs.example.com\n"):
             self.assertEqual(self._scan("requirements.txt", safe), set(), safe)
+        # the comment must not hide a genuinely unpinned requirement either
+        self.assertIn("unpinned_dependency", self._scan("requirements.txt", "pyyaml  # TODO pin\n"))
+
+    def test_duplicate_dep_name_distinct_lines(self):
+        # a dep named in two maps maps to two distinct lines (review regression)
+        from sbvf.sast.supply_chain import _scan_json_manifest
+        raw = ('{\n  "dependencies": { "lodash": "*" },\n'
+               '  "devDependencies": { "lodash": "*" }\n}')
+        lines = sorted(f.line for f in _scan_json_manifest("package.json", raw))
+        self.assertEqual(len(lines), 2)
+        self.assertNotEqual(lines[0], lines[1])
 
     def test_existing_samples_have_no_a03_findings(self):
         a03 = {"unpinned_dependency", "insecure_dependency_source"}

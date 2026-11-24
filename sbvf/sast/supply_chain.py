@@ -63,9 +63,13 @@ def _npm_unpinned(spec: str) -> bool:
     return False                            # exact or anything we can't judge
 
 
-def _find_line(raw: str, needle: str) -> int:
+def _find_line(raw: str, needle: str, used: Optional[set] = None) -> int:
+    """First line containing *needle*; when *used* is given, the first not-yet-used
+    one (so a dep named in two maps maps to two distinct lines), recording it."""
     for ln, line in enumerate(raw.splitlines(), 1):
-        if needle in line:
+        if needle in line and (used is None or ln not in used):
+            if used is not None:
+                used.add(ln)
             return ln
     return 1
 
@@ -94,6 +98,7 @@ def _scan_json_manifest(rel: str, raw: str) -> List[Finding]:
     if not isinstance(data, dict):
         return []
     out: List[Finding] = []
+    used: set = set()                               # lines already attributed to a dep
     for key in _DEP_KEYS:
         deps = data.get(key)
         if not isinstance(deps, dict):
@@ -103,7 +108,7 @@ def _scan_json_manifest(rel: str, raw: str) -> List[Finding]:
                 continue
             if _NOT_A_PACKAGE.match(name):          # php / ext-* platform reqs
                 continue
-            line = _find_line(raw, f'"{name}"')
+            line = _find_line(raw, f'"{name}"', used)
             sink = f"{name}: {spec}"
             if _insecure_source(spec):
                 out.append(_emit("insecure_dependency_source", "A03-insecure-source",
@@ -117,7 +122,10 @@ def _scan_json_manifest(rel: str, raw: str) -> List[Finding]:
 def _scan_requirements(rel: str, raw: str) -> List[Finding]:
     out: List[Finding] = []
     for ln, line in enumerate(raw.splitlines(), 1):
-        s = line.strip()
+        # Strip an inline comment (whitespace + '#') FIRST, before any check, so a
+        # URL in a trailing comment is not read as the dependency source. A '#egg='
+        # fragment in a VCS URL has no leading whitespace, so it is preserved.
+        s = re.split(r"\s+#", line.strip(), 1)[0].strip()
         if not s or s.startswith("#"):
             continue
         if _insecure_source(s):                      # http:// index or git+http VCS
@@ -126,7 +134,7 @@ def _scan_requirements(rel: str, raw: str) -> List[Finding]:
             continue
         if s.startswith("-"):                        # -r / -e https / --hash / options
             continue
-        req = s.split("#")[0].split(";")[0].strip()  # drop comment + env marker
+        req = s.split(";", 1)[0].strip()             # drop env marker
         # pinned iff an exact (==) or compatible-release (~=) operator, or a
         # direct URL requirement (name @ url) is present.
         if "==" in req or "~=" in req or "@" in req:
