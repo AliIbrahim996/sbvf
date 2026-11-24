@@ -260,6 +260,37 @@ VULN_INFO = {
             "If a rich format is unavoidable, sign the payload (HMAC) and verify before decoding.",
         ],
     },
+    # --- OWASP A10: Mishandling Exceptions (sbvf/sast/rules.py) ---------------
+    "error_info_leak": {
+        "cwe": "CWE-209", "severity": "medium", "title": "Sensitive Data in Error Message",
+        "desc": "An exception message, stack trace or traceback is returned or echoed to the "
+                "client instead of being logged server-side.",
+        "owner": "Backend / security engineering", "exposure": ["Systems", "Data"],
+        "impact": "Leaked exception text and stack traces reveal file paths, framework and "
+                  "library versions, SQL, and internal logic — a reconnaissance aid that "
+                  "lets an attacker fingerprint the stack and craft targeted exploits, and "
+                  "can disclose secrets embedded in the error.",
+        "fix": [
+            "Return a generic error (and an opaque correlation id) to the client; never the exception text.",
+            "Log the full exception and stack trace server-side only.",
+            "Disable framework debug/verbose error pages in production.",
+            "Add a catch-all error handler that maps unhandled exceptions to a 500 with no detail.",
+        ],
+    },
+    "swallowed_exception": {
+        "cwe": "CWE-390", "severity": "low", "title": "Swallowed or Overly Broad Exception",
+        "desc": "An exception is caught and silently ignored (empty catch / except: pass) or a "
+                "bare/overly broad handler hides the error condition.",
+        "owner": "Backend / engineering", "exposure": ["Systems", "Data"],
+        "impact": "Silently discarding an error lets the program continue in an unexpected "
+                  "state — security checks that fail open, corrupted data written anyway, and "
+                  "attacks that leave no trace because the failure was never logged or raised.",
+        "fix": [
+            "Catch the specific exception you can handle, not a bare except / catch (Throwable).",
+            "At minimum log the exception; never leave the handler body empty.",
+            "Re-raise or fail closed when the error means the operation cannot safely continue.",
+        ],
+    },
 }
 
 # Severity ordering for sorting the report (most serious first).

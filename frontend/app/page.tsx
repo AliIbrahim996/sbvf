@@ -7,6 +7,7 @@ const COVERAGE = [
   { tag: "A02", name: "Security Misconfiguration", cwe: "CWE-16" },
   { tag: "A04", name: "Cryptographic Failures", cwe: "CWE-327 / 798" },
   { tag: "A08", name: "Software & Data Integrity Failures", cwe: "CWE-502" },
+  { tag: "A10", name: "Mishandling Exceptions", cwe: "CWE-209 / 390" },
   { tag: "—", name: "SQL Injection", cwe: "CWE-89" },
   { tag: "—", name: "Cross-Site Scripting", cwe: "CWE-79" },
   { tag: "—", name: "Command Injection", cwe: "CWE-78" },

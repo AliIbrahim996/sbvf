@@ -1402,5 +1402,103 @@ class TestInsecureDeserialization(unittest.TestCase):
                 [f for f in r["findings"] if f["vuln"] == "insecure_deserialization"], name)
 
 
+class TestMishandledExceptions(unittest.TestCase):
+    """OWASP A10: exception-handling pattern rules flag leaked error detail
+    (CWE-209) and swallowed/overly broad handlers (CWE-390), not safe code."""
+
+    def setUp(self):
+        self.r = scan_path(os.path.join(SAMPLES, "errors_py"))
+        self.src = open(os.path.join(SAMPLES, "errors_py", "app.py")).read().splitlines()
+
+    def _line(self, needle):
+        return next(i for i, l in enumerate(self.src, 1) if needle in l)
+
+    def test_each_class_fires_on_vulnerable_code(self):
+        got = _vulns(self.r)
+        self.assertIn(("error_info_leak", self._line("jsonify(error=str(e))")), got)
+        self.assertIn(("error_info_leak", self._line("traceback.format_exc()")), got)
+        self.assertIn(("swallowed_exception", self._line("except:")), got)
+        self.assertIn(("swallowed_exception", self._line("except Exception: pass")), got)
+
+    def test_counts(self):
+        vs = [v for v, _ in _vulns(self.r)]
+        self.assertEqual((vs.count("error_info_leak"), vs.count("swallowed_exception")), (2, 2))
+        self.assertSetEqual({v for v, _ in _vulns(self.r)},
+                            {"error_info_leak", "swallowed_exception"})
+        self.assertEqual(len(self.r["findings"]), 4)        # nothing from safe.py
+
+    def test_safe_counterpart_not_flagged(self):
+        from sbvf.sast.rules import scan_text
+        safe = open(os.path.join(SAMPLES, "errors_py", "safe.py")).read()
+        self.assertEqual([f.vuln for f in scan_text("safe.py", safe)], [])
+
+    def test_metadata(self):
+        f = {x["vuln"]: x for x in self.r["findings"]}
+        self.assertEqual((f["error_info_leak"]["cwe"], f["error_info_leak"]["severity"]),
+                         ("CWE-209", "medium"))
+        self.assertEqual((f["swallowed_exception"]["cwe"], f["swallowed_exception"]["severity"]),
+                         ("CWE-390", "low"))
+        for x in f.values():
+            self.assertTrue(x["fix"] and x["impact"] and x["owner"] and x["exposure"] and x["how_in"])
+
+    def test_streams_finding_steps(self):
+        steps = []
+        scan_path(os.path.join(SAMPLES, "errors_py"), on_step=steps.append)
+        self.assertEqual(sum(1 for s in steps if s.kind == "finding"), 4)
+
+    def _scan(self, name, code):
+        with tempfile.TemporaryDirectory() as d:
+            with open(os.path.join(d, name), "w") as fh:
+                fh.write(code)
+            return {f["vuln"] for f in scan_path(d)["findings"]}
+
+    def test_python_variants(self):
+        self.assertIn("error_info_leak", self._scan("a.py", "def v():\n    return str(e)\n"))
+        self.assertIn("error_info_leak", self._scan("a.py", "def v():\n    return jsonify(msg=str(exc))\n"))
+        self.assertIn("swallowed_exception", self._scan("a.py", "try:\n    x()\nexcept:\n    pass\n"))
+        self.assertIn("swallowed_exception", self._scan("a.py", "try:\n    x()\nexcept BaseException:\n    log()\n"))
+        for safe in ("def v():\n    return jsonify(data=rows)\n",
+                     "try:\n    x()\nexcept ValueError as e:\n    logger.error(str(e))\n    raise\n",
+                     "try:\n    x()\nexcept ValueError:\n    return 'bad input', 400\n",
+                     '"""return str(e) is only mentioned in this docstring."""\n'):
+            self.assertEqual(self._scan("a.py", safe), set(), safe)
+
+    def test_php_variants(self):
+        self.assertIn("error_info_leak", self._scan("a.php", "<?php echo $e->getMessage();\n"))
+        self.assertIn("error_info_leak", self._scan("a.php", "<?php die($ex->getMessage());\n"))
+        self.assertIn("swallowed_exception", self._scan("a.php", "<?php try { x(); } catch (\\Exception $e) {}\n"))
+        for safe in ("<?php echo 'something went wrong';\n",
+                     "<?php try { x(); } catch (\\RuntimeException $e) { $log->error($e); }\n"):
+            self.assertEqual(self._scan("a.php", safe), set(), safe)
+
+    def test_js_variants(self):
+        self.assertIn("error_info_leak", self._scan("a.js", "app.use((err, req, res, n) => { res.send(err.stack); });\n"))
+        self.assertIn("error_info_leak", self._scan("a.js", "function h(err, res) { res.json({ error: err.message }); }\n"))
+        self.assertIn("swallowed_exception", self._scan("a.js", "try { x(); } catch (e) {}\n"))
+        self.assertIn("swallowed_exception", self._scan("a.js", "doThing().catch(() => {});\n"))
+        for safe in ("function h(req, res) { res.send('internal error'); }\n",
+                     "try { x(); } catch (e) { logger.error(e.stack); }\n",
+                     "try { x(); } catch (e) { console.error(e); }\n"):
+            self.assertEqual(self._scan("a.js", safe), set(), safe)
+
+    def test_precision(self):
+        from sbvf.sast.rules import scan_text
+        # a plain, properly-handled broad catch is not flagged (only bare/BaseException/one-line-pass)
+        self.assertNotIn("swallowed_exception",
+                         {f.vuln for f in scan_text("a.py", "    except Exception:\n")})
+        # logging the exception server-side is the safe form, not a leak
+        self.assertNotIn("error_info_leak",
+                         {f.vuln for f in scan_text("a.py", "    logger.error(str(e))\n")})
+
+    def test_existing_samples_have_no_a10_findings(self):
+        a10 = {"error_info_leak", "swallowed_exception"}
+        for name in os.listdir(SAMPLES):
+            if name == "errors_py":
+                continue
+            r = scan_path(os.path.join(SAMPLES, name))
+            self.assertFalse(
+                [f for f in r["findings"] if f["vuln"] in a10], name)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

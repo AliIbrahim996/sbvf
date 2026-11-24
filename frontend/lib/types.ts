@@ -150,4 +150,5 @@ export const SAMPLES: { value: string; label: string }[] = [
   { value: "crypto_py", label: "Crypto failures · Python (A04)" },
   { value: "misconfig_py", label: "Security misconfig · Python (A02)" },
   { value: "deser_py", label: "Insecure deserialization · Python (A08)" },
+  { value: "errors_py", label: "Mishandling exceptions · Python (A10)" },
 ];

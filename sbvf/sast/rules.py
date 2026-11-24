@@ -320,6 +320,50 @@ RULES: List[Rule] = [
         exclude=r"SafeLoader|BaseLoader|(?<!un)safe_load",
         message="YAML is parsed with a full (unsafe) loader; the document can construct "
                 "arbitrary objects. Use yaml.safe_load / Loader=SafeLoader."),
+
+    # ----------------------------------------------------------------------
+    # A10 - Mishandling Exceptions
+    # ----------------------------------------------------------------------
+    Rule(
+        id="A10-error-info-leak", vuln="error_info_leak",
+        patterns={
+            # returning / rendering the exception (str(e), .args, traceback) to the client.
+            # return/except patterns are anchored to line start so the same words inside
+            # a docstring or string literal are not misread as code.
+            "py": [r"^\s*return\s+[^#]*\bstr\s*\(\s*(?:e|ex|exc|err|error|exception)\s*\)",
+                   r"^\s*return\s+[^#]*traceback\s*\.\s*format_exc\s*\(",
+                   r"\b(?:jsonify|JsonResponse|HttpResponse\w*|Response|make_response|abort)\s*\("
+                   r"[^#]*(?:str\s*\(\s*(?:e|ex|exc|err|error|exception)\s*\)|"
+                   r"traceback\s*\.\s*format_exc\s*\(|\.\s*args\b)"],
+            # echoing / printing the exception message or trace to output
+            "php": [r"\b(?:echo|print|printf|vprintf|die|exit)\b[^;]*->\s*getMessage\s*\(",
+                    r"\b(?:echo|print|printf|die|exit)\b[^;]*->\s*getTraceAsString\s*\(",
+                    r"\b(?:print_r|var_dump|var_export)\s*\(\s*\$\w*(?:exception|error|err)\w*\b"],
+            # writing the error object / its stack or message into the HTTP response
+            "js": [r"\.\s*(?:send|json|write|end)\s*\([^;]*\b(?:err|error|exception|ex)\s*\.\s*(?:stack|message)\b",
+                   r"\.\s*(?:send|json)\s*\(\s*(?:err|error|exception)\s*\)"],
+        },
+        # logging the exception server-side is the safe form, never a leak.
+        exclude=r"console\s*\.\s*(?:log|error|warn|debug|info)|\blogger\b|\blogging\b|"
+                r"error_log\s*\(|\bsyslog\b|->\s*log\s*\(|\bLog\s*::",
+        message="An exception message, stack trace or traceback is sent to the client "
+                "instead of being logged server-side, leaking internal details."),
+    Rule(
+        id="A10-swallowed-exception", vuln="swallowed_exception",
+        patterns={
+            # bare / overly broad catch, or a one-line handler that only passes.
+            # Anchored to line start: real handlers are statements, so "except:"
+            # mentioned in prose/strings is not flagged.
+            "py": [r"^\s*except\s*:",
+                   r"^\s*except\s+BaseException\b",
+                   r"^\s*except\b[^:#]*:\s*pass\b"],
+            # an empty catch body { } swallows the error
+            "php": [r"\bcatch\s*\([^)]*\)\s*\{\s*\}"],
+            "js": [r"\bcatch\s*(?:\(\s*[\w$]*\s*\))?\s*\{\s*\}",
+                   r"\.\s*catch\s*\(\s*(?:\(\s*\)|[\w$]+)\s*=>\s*\{\s*\}\s*\)"],
+        },
+        message="An exception is caught and silently discarded (empty catch / except: pass) "
+                "or a bare/overly broad handler hides the failure."),
 ]
 
 
