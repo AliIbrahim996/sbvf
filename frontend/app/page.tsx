@@ -1,212 +1,154 @@
-"use client";
-import { useEffect, useRef, useState } from "react";
-import { FindingCard } from "@/components/FindingCard";
-import { exportPdf } from "@/lib/pdf";
-import { SAMPLES, type Finding, type ScanResult, type ScanStep } from "@/lib/types";
+import Link from "next/link";
+import { Nav } from "@/components/Nav";
+import { Reveal } from "@/components/Reveal";
 
-const STEP_BADGE: Record<string, { cls: string; label: string }> = {
-  clone: { cls: "b-detect", label: "CLONE" },
-  detect: { cls: "b-detect", label: "DETECT" },
-  file: { cls: "b-file", label: "FILE" },
-  source: { cls: "b-src", label: "SOURCE" },
-  finding: { cls: "b-find", label: "FINDING" },
-  summary: { cls: "b-sum", label: "DONE" },
-  error: { cls: "b-find", label: "ERROR" },
-};
+const COVERAGE = [
+  { tag: "A01", name: "Broken Access Control", cwe: "IDOR · CWE-639" },
+  { tag: "A02", name: "Security Misconfiguration", cwe: "CWE-16" },
+  { tag: "A04", name: "Cryptographic Failures", cwe: "CWE-327 / 798" },
+  { tag: "—", name: "SQL Injection", cwe: "CWE-89" },
+  { tag: "—", name: "Cross-Site Scripting", cwe: "CWE-79" },
+  { tag: "—", name: "Command Injection", cwe: "CWE-78" },
+  { tag: "—", name: "Path / File Inclusion", cwe: "CWE-98 / 22" },
+  { tag: "—", name: "Code Injection", cwe: "CWE-94" },
+];
 
-export default function Page() {
-  const [sample, setSample] = useState("php_native");
-  const [path, setPath] = useState("");
-  const [steps, setSteps] = useState<{ kind: string; text: string }[]>([]);
-  const [findings, setFindings] = useState<Finding[]>([]);
-  const [result, setResult] = useState<ScanResult | null>(null);
-  const [status, setStatus] = useState("Idle — choose a project and press Scan");
-  const [scanning, setScanning] = useState(false);
-  const [stack, setStack] = useState("—");
-  const [files, setFiles] = useState(0);
-  const esRef = useRef<EventSource | null>(null);
-  const logRef = useRef<HTMLDivElement | null>(null);
+const FEATURES = [
+  {
+    title: "Static taint analysis",
+    body: "Traces untrusted input from source to sink across PHP, Python, and JavaScript / TypeScript — with framework awareness for Django, FastAPI, Flask, Laravel, Yii, Express and NestJS.",
+    icon: (
+      <path d="M3 12h4l3-8 4 16 3-8h4" />
+    ),
+  },
+  {
+    title: "Search-based testing",
+    body: "Genetic, cuckoo-search and random strategies drive inputs against live benchmark targets to confirm exploitability — not just pattern matches.",
+    icon: (
+      <>
+        <circle cx="11" cy="11" r="7" />
+        <path d="m21 21-4.3-4.3" />
+      </>
+    ),
+  },
+  {
+    title: "Findings in plain terms",
+    body: "Every result explains how it got in, what the business stands to lose, and how to close it — with owner, exposure and prioritised remediation steps.",
+    icon: (
+      <>
+        <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
+        <path d="M14 2v6h6M9 13h6M9 17h4" />
+      </>
+    ),
+  },
+  {
+    title: "Exportable PDF reports",
+    body: "Turn any scan into a clean, branded vulnerability report — severity summary, per-finding detail and remediation — ready to share with stakeholders.",
+    icon: (
+      <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M7 10l5 5 5-5M12 15V3" />
+    ),
+  },
+];
 
-  const highCount = findings.filter((f) => f.severity === "high" || f.severity === "critical").length;
+const STEPS = [
+  { n: "1", title: "Point it at code", body: "Choose a bundled sample, a local folder, or paste a GitHub / GitLab / Bitbucket URL." },
+  { n: "2", title: "Watch it analyze", body: "Detection, file walk, taint tracing and findings stream live over Server-Sent Events." },
+  { n: "3", title: "Act on the findings", body: "Review prioritised results with remediation, then export a shareable PDF report." },
+];
 
-  // Close the stream if the component unmounts mid-scan.
-  useEffect(() => () => esRef.current?.close(), []);
-
-  function pushStep(s: { kind: string; text: string }) {
-    setSteps((prev) => [...prev, s]);
-    requestAnimationFrame(() => {
-      if (logRef.current) logRef.current.scrollTop = logRef.current.scrollHeight;
-    });
-  }
-
-  function parse<T>(e: Event): T | null {
-    try {
-      return JSON.parse((e as MessageEvent).data) as T;
-    } catch {
-      return null;
-    }
-  }
-
-  function scan() {
-    esRef.current?.close();
-    setSteps([]);
-    setFindings([]);
-    setResult(null);
-    setStack("…");
-    setFiles(0);
-    const live: Finding[] = [];
-    const remote = /^(https?:\/\/|git@|(www\.)?(github\.com|gitlab\.com|bitbucket\.org)\/)/i.test(path.trim());
-    setStatus(remote ? "Cloning repository…" : "Scanning…");
-    setScanning(true);
-    const qs = path.trim() ? `path=${encodeURIComponent(path.trim())}` : `sample=${sample}`;
-    const es = new EventSource(`/api/scan?${qs}`);
-    esRef.current = es;
-
-    es.addEventListener("scan_step", (e) => {
-      const d = parse<ScanStep>(e);
-      if (!d) return;
-      pushStep({ kind: d.kind, text: d.text });
-      if (d.kind === "detect") {
-        setStatus("Scanning…");
-        const fw = d.data?.frameworks as Record<string, string> | undefined;
-        if (fw) setStack(Object.values(fw).filter(Boolean).join(", ") || "none");
-        if (typeof d.data?.file_count === "number") setFiles(d.data.file_count as number);
-      }
-      if (d.kind === "finding" && d.data?.finding) {
-        live.push(d.data.finding as Finding);
-        setFindings([...live]);
-      }
-    });
-    es.addEventListener("scan_done", (e) => {
-      const r = parse<ScanResult>(e);
-      if (r) {
-        setResult(r);
-        setFindings(r.findings);
-        setFiles(r.files_scanned);
-        setStatus("Completed");
-      } else {
-        pushStep({ kind: "error", text: "malformed scan_done from backend" });
-        setStatus("Error");
-      }
-      setScanning(false);
-      es.close();
-    });
-    es.addEventListener("scan_error", (e) => {
-      const d = parse<{ message: string }>(e);
-      pushStep({ kind: "error", text: d?.message || "scan error" });
-      setStatus("Error");
-      setScanning(false);
-      es.close();
-    });
-    es.onerror = () => {
-      setStatus((s) => (s === "Completed" ? s : "Stream ended"));
-      setScanning(false);
-      es.close();
-    };
-  }
-
+export default function Landing() {
   return (
     <div className="shell">
-      <header className="top">
-        <div className="logo">🛡️</div>
-        <div className="brand">
-          <h1>SBVF · Search-Based Vulnerability Framework</h1>
-          <p>Finds how it got in, what the business stands to lose, and how to close it.</p>
-        </div>
-        <span className="badge-next">Next.js</span>
-      </header>
+      <Nav
+        right={
+          <Link href="/scan" className="btn btn-primary btn-sm nav-cta">
+            Open scanner
+          </Link>
+        }
+      />
 
-      <div className="toolbar">
-        <div className="field">
-          <label>Sample project</label>
-          <select value={sample} onChange={(e) => setSample(e.target.value)}>
-            {SAMPLES.map((s) => (
-              <option key={s.value} value={s.value}>
-                {s.label}
-              </option>
-            ))}
-          </select>
-        </div>
-        <div className="field" style={{ flex: 1, minWidth: 240 }}>
-          <label>…or a local folder / GitHub · GitLab · Bitbucket repo URL</label>
-          <input
-            type="text"
-            value={path}
-            onChange={(e) => setPath(e.target.value)}
-            placeholder="C:\path\to\project   or   https://github.com/owner/repo (overrides sample)"
-            style={{ minWidth: "100%" }}
-          />
-        </div>
-        <button className="run-btn" onClick={scan} disabled={scanning}>
-          ▶&nbsp;&nbsp;Scan code
-        </button>
-      </div>
-
-      <div className="kpis">
-        <div className="kpi">
-          <div className="cap">Files scanned</div>
-          <div className="big">{files}</div>
-        </div>
-        <div className="kpi">
-          <div className="cap">Findings</div>
-          <div className="big" style={{ color: "var(--bad)" }}>{findings.length}</div>
-        </div>
-        <div className="kpi">
-          <div className="cap">High / Critical</div>
-          <div className="big" style={{ color: "var(--bad)" }}>{highCount}</div>
-        </div>
-        <div className="kpi">
-          <div className="cap">Detected stack</div>
-          <div className="big" style={{ fontSize: 17, paddingTop: 12 }}>{stack}</div>
-        </div>
-      </div>
-
-      <div className="card">
-        <h2>
-          Analysis steps <span className="tag">{status}</span>
-        </h2>
-        <div className="log" ref={logRef}>
-          {steps.length === 0 ? (
-            <div className="empty">The analyzer streams every step: detect → walk files → taint → findings.</div>
-          ) : (
-            steps.map((s, i) => {
-              const b = STEP_BADGE[s.kind] || STEP_BADGE.file;
-              return (
-                <div className="ln" key={i}>
-                  <span className={`lbadge ${b.cls}`}>{b.label}</span>
-                  <span className="pl">{s.text}</span>
-                </div>
-              );
-            })
-          )}
-        </div>
-      </div>
-
-      <div className="card">
-        <h2>
-          Findings <span className="tag">{findings.length} vulnerabilities</span>
-          <button
-            className="ghost-btn"
-            style={{ marginLeft: 12 }}
-            disabled={!result || findings.length === 0}
-            onClick={() => result && exportPdf(result)}
-          >
-            ⬇ Export PDF report
-          </button>
-        </h2>
-        <p style={{ margin: "-6px 0 14px", color: "var(--muted)", fontSize: 12.5 }}>
-          Each finding opens to show <b style={{ color: "var(--accent)" }}>how it got in</b>,{" "}
-          <b style={{ color: "var(--warn)" }}>business impact</b>, and{" "}
-          <b style={{ color: "var(--ok)" }}>how to close it</b>.
+      <section className="lp-hero">
+        <span className="lp-eyebrow anim-up" style={{ animationDelay: "40ms" }}>Static + search-based web security analysis</span>
+        <h1 className="anim-up" style={{ animationDelay: "120ms" }}>Find the flaw.<br />See the cost. Close the gap.</h1>
+        <p className="anim-up" style={{ animationDelay: "220ms" }}>
+          SBVF pairs static taint analysis with search-based testing to surface real web
+          vulnerabilities — each one explained in plain business terms, not just a CWE number.
         </p>
-        <div className="findings">
-          {findings.length === 0 ? (
-            <div className="empty">No scan yet. Press Scan to analyze the source code.</div>
-          ) : (
-            findings.map((f, i) => <FindingCard key={i} finding={f} defaultOpen={i === 0} />)
-          )}
+        <div className="lp-cta anim-up" style={{ animationDelay: "320ms" }}>
+          <Link href="/scan" className="btn btn-primary btn-lg">
+            <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden><path d="M8 5v14l11-7z" /></svg>
+            Launch the scanner
+          </Link>
+          <a href="#how" className="btn btn-ghost btn-lg">How it works</a>
         </div>
-      </div>
+      </section>
+
+      <Reveal className="lp-section">
+        <div className="lp-section-head">
+          <h2>What it detects</h2>
+          <p>OWASP Top-10 classes and the taint-based vulnerabilities behind them.</p>
+        </div>
+        <div className="coverage">
+          {COVERAGE.map((c) => (
+            <div className="cov" key={c.name}>
+              <span className={`cov-tag${c.tag === "—" ? " muted" : ""}`}>{c.tag}</span>
+              <div>
+                <div className="cov-name">{c.name}</div>
+                <div className="cov-cwe">{c.cwe}</div>
+              </div>
+            </div>
+          ))}
+        </div>
+      </Reveal>
+
+      <Reveal className="lp-section">
+        <div className="lp-section-head">
+          <h2>Built to be understood</h2>
+          <p>Not another wall of raw alerts — findings a team can actually act on.</p>
+        </div>
+        <div className="feature-grid">
+          {FEATURES.map((f) => (
+            <div className="feature" key={f.title}>
+              <span className="feature-ic" aria-hidden>
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                  {f.icon}
+                </svg>
+              </span>
+              <h3>{f.title}</h3>
+              <p>{f.body}</p>
+            </div>
+          ))}
+        </div>
+      </Reveal>
+
+      <Reveal className="lp-section" id="how">
+        <div className="lp-section-head">
+          <h2>How it works</h2>
+          <p>From source code to a shareable report in three steps.</p>
+        </div>
+        <div className="steps">
+          {STEPS.map((s) => (
+            <div className="step" key={s.n}>
+              <span className="step-n">{s.n}</span>
+              <h3>{s.title}</h3>
+              <p>{s.body}</p>
+            </div>
+          ))}
+        </div>
+      </Reveal>
+
+      <Reveal>
+        <section className="lp-band">
+          <div>
+            <h2>Ready to scan?</h2>
+            <p>Run it against a bundled sample in seconds — no setup required.</p>
+          </div>
+          <Link href="/scan" className="btn btn-primary btn-lg">
+            <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden><path d="M8 5v14l11-7z" /></svg>
+            Launch the scanner
+          </Link>
+        </section>
+      </Reveal>
 
       <footer>SBVF research prototype · all targets run on 127.0.0.1 · for academic use only</footer>
     </div>

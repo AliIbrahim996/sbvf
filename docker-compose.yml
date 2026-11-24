@@ -1,12 +1,13 @@
-# SBVF benchmark + optional DVWA training target.
+# SBVF — backend API + Next.js dashboard, plus optional training targets.
 #
-#   docker compose up sbvf        -> dashboard at http://localhost:8080
-#   docker compose --profile labs up   -> also starts DVWA at http://localhost:8081
+#   docker compose up                  -> backend API  http://localhost:8080
+#                                         Next.js UI    http://localhost:3000
+#   docker compose --profile labs up   -> also starts DVWA (8081) and Juice Shop (3002)
 #
-# DVWA is a well-known deliberately-vulnerable training app, used here only as an
-# extra local practice target. It is NOT pointed at by the framework automatically
-# (the framework is restricted to its own 127.0.0.1 benchmark apps); run manual
-# experiments against it with --allow-remote only on your own machine.
+# DVWA and Juice Shop are well-known deliberately-vulnerable training apps, used
+# here only as extra local practice targets. They are NOT pointed at by the
+# framework automatically (it is restricted to its own 127.0.0.1 benchmark apps);
+# run manual experiments against them with --allow-remote only on your own machine.
 
 services:
   sbvf:
@@ -25,6 +26,19 @@ services:
       - ./testbed:/app/testbed:ro
     restart: unless-stopped
 
+  frontend:
+    build: ./frontend
+    image: sbvf-frontend:latest
+    ports:
+      - "3000:3000"
+    environment:
+      # The Next.js route handler proxies /api/* to the backend. Inside the
+      # compose network the backend is reachable by its service name.
+      SBVF_API_ORIGIN: "http://sbvf:8080"
+    depends_on:
+      - sbvf
+    restart: unless-stopped
+
   dvwa:
     image: vulnerables/web-dvwa:latest
     profiles: ["labs"]
@@ -36,5 +50,6 @@ services:
     image: bkimminich/juice-shop:latest
     profiles: ["labs"]
     ports:
-      - "3000:3000"
+      # Host 3002 — 3000 is taken by the SBVF frontend.
+      - "3002:3000"
     restart: unless-stopped
