@@ -1,6 +1,7 @@
 "use client";
 import { useState } from "react";
 import type { Assessment, Finding, RankItem } from "@/lib/types";
+import { DetectionPath } from "./DetectionPath";
 
 const IconIn = () => (
   <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
@@ -72,6 +73,7 @@ export function FindingCard({
       </div>
       {open && (
         <div className="fbody">
+          <DetectionPath finding={f} />
           <section className="panel">
             <div className="eyebrow">
               <IconIn /> How it got in
