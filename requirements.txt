@@ -1,0 +1,5 @@
+# Optional dependencies for the persistence layer (sbvf/store/).
+# The core scanner (sbvf/sast/**) and the dashboard run on the Python standard
+# library alone; these are only needed when DATABASE_URL is configured.
+psycopg[binary]>=3.2
+psycopg_pool>=3.2
