@@ -5,6 +5,7 @@ import { Reveal } from "@/components/Reveal";
 const COVERAGE = [
   { tag: "A01", name: "Broken Access Control", cwe: "IDOR · CWE-639" },
   { tag: "A02", name: "Security Misconfiguration", cwe: "CWE-16" },
+  { tag: "A03", name: "Supply Chain Failures", cwe: "CWE-1104 / 829" },
   { tag: "A04", name: "Cryptographic Failures", cwe: "CWE-327 / 798" },
   { tag: "A08", name: "Software & Data Integrity Failures", cwe: "CWE-502" },
   { tag: "A10", name: "Mishandling Exceptions", cwe: "CWE-209 / 390" },

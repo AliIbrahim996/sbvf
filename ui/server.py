@@ -42,6 +42,7 @@ SAST_SAMPLES = {
     "misconfig_py": "Security misconfig (Python)",
     "deser_py": "Insecure deserialization (Python)",
     "errors_py": "Mishandling exceptions (Python)",
+    "supplychain": "Supply chain (manifests)",
 }
 SAST_DIR = os.path.join(ROOT, "testbed", "sast_samples")
 

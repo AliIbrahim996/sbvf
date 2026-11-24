@@ -291,6 +291,34 @@ VULN_INFO = {
             "Re-raise or fail closed when the error means the operation cannot safely continue.",
         ],
     },
+    # --- OWASP A03: Supply Chain (sbvf/sast/supply_chain.py) ------------------
+    "unpinned_dependency": {
+        "cwe": "CWE-1104", "severity": "low", "title": "Unpinned Dependency Version",
+        "desc": "A dependency is declared with a floating or unbounded version "
+                "(*, latest, a 1.x wildcard, or an open >= range) instead of a pinned version.",
+        "owner": "DevOps / platform", "exposure": ["Systems", "Data"],
+        "impact": "A floating version lets a later — possibly malicious or breaking — release "
+                  "be pulled into the build without review, the entry point for "
+                  "dependency-confusion and compromised-package supply-chain attacks.",
+        "fix": [
+            "Pin dependencies to exact versions (name==1.2.3 / \"dep\": \"1.2.3\").",
+            "Commit a lockfile (package-lock.json, composer.lock, pip hashes) and install from it.",
+            "Bump versions deliberately through a reviewed process (e.g. Dependabot PRs).",
+        ],
+    },
+    "insecure_dependency_source": {
+        "cwe": "CWE-829", "severity": "high", "title": "Insecure Dependency Source",
+        "desc": "A dependency is fetched over an untrusted channel (http://, git:// or git+http).",
+        "owner": "DevOps / platform", "exposure": ["Systems", "Data", "Accounts"],
+        "impact": "Code pulled over a non-TLS or unverified channel can be tampered with in "
+                  "transit or served from an attacker-controlled host, injecting malicious "
+                  "code straight into the build and runtime.",
+        "fix": [
+            "Fetch dependencies only over HTTPS from a trusted registry.",
+            "Replace http:// and git:// sources with https:// and pin to a commit hash or signed release.",
+            "Mirror third-party packages into a vetted internal registry and verify integrity hashes.",
+        ],
+    },
 }
 
 # Severity ordering for sorting the report (most serious first).

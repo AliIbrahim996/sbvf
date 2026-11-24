@@ -151,4 +151,5 @@ export const SAMPLES: { value: string; label: string }[] = [
   { value: "misconfig_py", label: "Security misconfig · Python (A02)" },
   { value: "deser_py", label: "Insecure deserialization · Python (A08)" },
   { value: "errors_py", label: "Mishandling exceptions · Python (A10)" },
+  { value: "supplychain", label: "Supply chain · manifests (A03)" },
 ];

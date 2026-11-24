@@ -17,6 +17,7 @@ from .php import PhpAnalyzer
 from .python_analyzer import PythonAnalyzer
 from .js import JsAnalyzer
 from .rules import scan_rules
+from .supply_chain import scan_supply_chain
 
 
 class Scanner:
@@ -92,6 +93,10 @@ class Scanner:
                            "A08 integrity, A10 exception handling) ...")
         for f in scan_rules(root, on_step=self.on_step, files=files,
                             frameworks=frameworks):
+            findings.append(f)
+
+        self._step("file", "Scanning dependency manifests (A03 supply chain) ...")
+        for f in scan_supply_chain(root, on_step=self.on_step):
             findings.append(f)
 
         findings.sort(key=lambda f: (SEVERITY_RANK.get(f.severity, 9),
