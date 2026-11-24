@@ -1,6 +1,6 @@
 "use client";
 import { useState } from "react";
-import type { Finding } from "@/lib/types";
+import type { Assessment, Finding, RankItem } from "@/lib/types";
 
 const IconIn = () => (
   <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
@@ -22,13 +22,32 @@ const Chevron = () => (
     <path d="m6 9 6 6 6-6" />
   </svg>
 );
+const IconAi = () => (
+  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+    <path d="M12 3v3M5.6 5.6l2.1 2.1M3 12h3M18 12h3M16.3 7.7l2.1-2.1M12 18v3M7.7 16.3l-2.1 2.1M16.3 16.3l2.1 2.1" />
+    <circle cx="12" cy="12" r="4" />
+  </svg>
+);
 
-/** One finding, as an expandable card with the three panels. */
-export function FindingCard({ finding, defaultOpen }: { finding: Finding; defaultOpen?: boolean }) {
+/** One finding, as an expandable card with the three panels, plus optional AI
+ *  assessment (false-positive verdict, risk rank, AI remediation). */
+export function FindingCard({
+  finding,
+  defaultOpen,
+  assessment,
+  rank,
+}: {
+  finding: Finding;
+  defaultOpen?: boolean;
+  assessment?: Assessment;
+  rank?: RankItem;
+}) {
   const [open, setOpen] = useState(!!defaultOpen);
   const f = finding;
+  const fp = assessment && assessment.is_false_positive === true;
+  const conf = assessment && assessment.confidence != null ? Math.round(assessment.confidence * 100) : null;
   return (
-    <article className={`finding sev-${f.severity} ${open ? "open" : ""}`}>
+    <article className={`finding sev-${f.severity} ${open ? "open" : ""} ${fp ? "is-fp" : ""}`}>
       <div className="fhead" onClick={() => setOpen((o) => !o)}>
         <span className={`sev sev-${f.severity}`}>{(f.severity || "").toUpperCase()}</span>
         <span className="ftitle">
@@ -36,6 +55,13 @@ export function FindingCard({ finding, defaultOpen }: { finding: Finding; defaul
           <span className="cwe">{f.cwe}</span>
         </span>
         <code className="floc">{f.location}</code>
+        {rank && <span className="airisk" title={rank.reason}>Risk {Math.round(rank.risk_score)}</span>}
+        {assessment && assessment.is_false_positive != null && (
+          <span className={`aibadge ${fp ? "fp" : "tp"}`} title={assessment.rationale}>
+            {fp ? "Likely false positive" : "Confirmed"}
+            {conf != null && <b>{conf}%</b>}
+          </span>
+        )}
         {f.action && <span className="faction">{f.action}</span>}
         <span className="chev">
           <Chevron />
@@ -81,6 +107,21 @@ export function FindingCard({ finding, defaultOpen }: { finding: Finding; defaul
               ))}
             </ol>
           </section>
+          {assessment && (assessment.remediation || assessment.rationale) && (
+            <section className="panel ai">
+              <div className="eyebrow aipanel">
+                <IconAi /> AI analysis
+                {assessment.provider && <span className="aimeta">{assessment.provider}{assessment.model ? ` · ${assessment.model}` : ""}</span>}
+              </div>
+              {assessment.rationale && (
+                <p className="airat">
+                  <b>Triage:</b> {assessment.rationale}
+                </p>
+              )}
+              {assessment.remediation_summary && <p className="aisum">{assessment.remediation_summary}</p>}
+              {assessment.remediation && <pre className="airem">{assessment.remediation.trim()}</pre>}
+            </section>
+          )}
         </div>
       )}
     </article>

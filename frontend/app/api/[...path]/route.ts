@@ -61,3 +61,36 @@ async function forward(req: NextRequest, ctx: { params: { path: string[] } }, me
 export function DELETE(req: NextRequest, ctx: { params: { path: string[] } }) {
   return forward(req, ctx, "DELETE");
 }
+
+// POST is streamed (the AI-agents endpoint emits SSE progress); the body is
+// forwarded and the upstream stream is passed straight through, like GET.
+export async function POST(req: NextRequest, ctx: { params: { path: string[] } }) {
+  const target = `${API}/api/${ctx.params.path.join("/")}${req.nextUrl.search}`;
+  const body = await req.text();
+  let upstream: Response;
+  try {
+    upstream = await fetch(target, {
+      method: "POST",
+      cache: "no-store",
+      headers: {
+        "content-type": req.headers.get("content-type") || "application/json",
+        accept: "text/event-stream",
+      },
+      body,
+    });
+  } catch {
+    return new Response(
+      `event: agents_error\ndata: ${JSON.stringify({ message: `cannot reach backend at ${API}` })}\n\n`,
+      { status: 502, headers: { "Content-Type": "text/event-stream" } },
+    );
+  }
+  return new Response(upstream.body, {
+    status: upstream.status,
+    headers: {
+      "Content-Type": upstream.headers.get("content-type") || "text/event-stream",
+      "Cache-Control": "no-cache, no-transform",
+      Connection: "keep-alive",
+      "X-Accel-Buffering": "no",
+    },
+  });
+}

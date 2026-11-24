@@ -81,8 +81,18 @@ class UIHandler(BaseHTTPRequestHandler):
         if parsed.path == "/api/scans":
             return self._list_scans(urllib.parse.parse_qs(parsed.query))
 
+        if parsed.path == "/api/ai/status":
+            return self._ai_status()
+
         if parsed.path.startswith("/api/scans/"):
-            return self._get_scan(parsed.path.rstrip("/").rsplit("/", 1)[-1])
+            parts = parsed.path.rstrip("/")[len("/api/scans/"):].split("/")
+            if len(parts) == 2 and parts[1] == "ai":
+                return self._get_scan_ai(parts[0])
+            if len(parts) == 1 and parts[0]:
+                return self._get_scan(parts[0])
+            self.send_response(404)
+            self.end_headers()
+            return
 
         if parsed.path == "/api/activity":
             return self._list_activity(urllib.parse.parse_qs(parsed.query))
@@ -96,6 +106,27 @@ class UIHandler(BaseHTTPRequestHandler):
             return self._delete_scan(parsed.path.rstrip("/").rsplit("/", 1)[-1])
         self.send_response(404)
         self.end_headers()
+
+    def do_POST(self):
+        parsed = urllib.parse.urlparse(self.path)
+        path = parsed.path.rstrip("/")
+        if path.startswith("/api/scans/") and path.endswith("/agents"):
+            scan_id = path[len("/api/scans/"):-len("/agents")]
+            return self._run_agents(scan_id)
+        self.send_response(404)
+        self.end_headers()
+
+    def _read_json_body(self):
+        try:
+            length = int(self.headers.get("Content-Length", 0) or 0)
+        except ValueError:
+            return {}
+        if length <= 0:
+            return {}
+        try:
+            return json.loads(self.rfile.read(length).decode("utf-8") or "{}")
+        except Exception:
+            return {}
 
     def _sse(self, event, data):
         payload = f"event: {event}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
@@ -153,6 +184,66 @@ class UIHandler(BaseHTTPRequestHandler):
         scan_id = int(sid) if sid not in (None, "") else None
         self._json({"enabled": True,
                     "activity": store.repository.list_activity(limit, scan_id)})
+
+    # ---- AI-agents layer (lazy import; degrades when no provider configured) ----
+    def _ai_status(self):
+        from sbvf import agents  # lazy: optional AI layer
+        self._json({"enabled": agents.is_enabled(),
+                    "providers": agents.available_providers()})
+
+    def _get_scan_ai(self, raw_id):
+        if not store.is_enabled():
+            return self._persistence_off()
+        try:
+            scan_id = int(raw_id)
+        except ValueError:
+            return self._json({"message": "bad scan id"}, code=400)
+        if store.repository.get_scan(scan_id) is None:
+            return self._json({"message": "scan not found"}, code=404)
+        self._json(store.repository.get_ai(scan_id))
+
+    def _run_agents(self, raw_id):
+        """Run the selected AI agents over a stored scan, streaming progress as SSE.
+
+        Consumed by the frontend via a streaming fetch (not EventSource, since this
+        is a POST). Each ``on_progress`` event is written as one SSE frame.
+        """
+        from sbvf import agents  # lazy: optional AI layer
+        try:
+            scan_id = int(raw_id)
+        except ValueError:
+            return self._json({"message": "bad scan id"}, code=400)
+        body = self._read_json_body()
+
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream")
+        self.send_header("Cache-Control", "no-cache")
+        self.send_header("Connection", "keep-alive")
+        self.end_headers()
+
+        try:
+            if not store.is_enabled():
+                self._sse("agents_error", {"message":
+                          "AI analysis requires the database service (set DATABASE_URL)."})
+                return
+            if not agents.is_enabled():
+                self._sse("agents_error", {"message":
+                          "No AI provider is configured. Set ANTHROPIC_API_KEY, "
+                          "OPENAI_API_KEY or OLLAMA_URL to enable AI analysis."})
+                return
+            agents.runner.run_finding_agents(
+                scan_id,
+                agents=body.get("agents") or None,
+                provider_name=body.get("provider") or None,
+                on_progress=lambda event, data: self._sse(event, data),
+            )
+        except (BrokenPipeError, ConnectionResetError):
+            pass
+        except Exception as exc:
+            try:
+                self._sse("agents_error", {"message": str(exc)})
+            except (BrokenPipeError, ConnectionResetError):
+                pass
 
     def _scan_stream(self, qs):
         """Server-Sent Events stream for a static (SAST) source-code scan.

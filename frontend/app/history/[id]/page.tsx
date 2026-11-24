@@ -1,11 +1,20 @@
 "use client";
 import Link from "next/link";
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { FindingCard } from "@/components/FindingCard";
 import { Nav } from "@/components/Nav";
 import { ActivityIcon, BackIcon } from "@/components/icons";
 import { exportPdf } from "@/lib/pdf";
-import type { ActivityEntry, Finding, StoredScan } from "@/lib/types";
+import type {
+  ActivityEntry,
+  AiStatus,
+  Assessment,
+  Finding,
+  Prioritization,
+  RankItem,
+  ScanAi,
+  StoredScan,
+} from "@/lib/types";
 
 const fmtDate = (s: string) => {
   try {
@@ -15,11 +24,49 @@ const fmtDate = (s: string) => {
   }
 };
 
+/** Parse a stream of `event:`/`data:` SSE frames, invoking `onEvent` per frame. */
+async function readSse(res: Response, onEvent: (event: string, data: any) => void) {
+  const reader = res.body?.getReader();
+  if (!reader) return;
+  const decoder = new TextDecoder();
+  let buf = "";
+  for (;;) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    buf += decoder.decode(value, { stream: true });
+    let sep;
+    while ((sep = buf.indexOf("\n\n")) !== -1) {
+      const frame = buf.slice(0, sep);
+      buf = buf.slice(sep + 2);
+      let event = "message";
+      const dataLines: string[] = [];
+      for (const line of frame.split("\n")) {
+        if (line.startsWith("event:")) event = line.slice(6).trim();
+        else if (line.startsWith("data:")) dataLines.push(line.slice(5).trim());
+      }
+      if (dataLines.length) {
+        try {
+          onEvent(event, JSON.parse(dataLines.join("\n")));
+        } catch {
+          /* ignore malformed frame */
+        }
+      }
+    }
+  }
+}
+
 export default function ScanDetail({ params }: { params: { id: string } }) {
   const id = params.id;
   const [scan, setScan] = useState<StoredScan | null>(null);
   const [activity, setActivity] = useState<ActivityEntry[]>([]);
   const [state, setState] = useState<"loading" | "ok" | "off" | "missing">("loading");
+
+  const [ai, setAi] = useState<AiStatus | null>(null);
+  const [assessments, setAssessments] = useState<Record<number, Assessment>>({});
+  const [prioritization, setPrioritization] = useState<Prioritization | null>(null);
+  const [running, setRunning] = useState(false);
+  const [progress, setProgress] = useState("");
+  const [aiError, setAiError] = useState("");
 
   useEffect(() => {
     (async () => {
@@ -32,15 +79,80 @@ export default function ScanDetail({ params }: { params: { id: string } }) {
         setState("ok");
         const a = await fetch(`/api/activity?scan_id=${id}`);
         if (a.ok) setActivity((await a.json()).activity || []);
+        const aiRes = await fetch(`/api/ai/status`);
+        if (aiRes.ok) setAi(await aiRes.json());
+        const stored = await fetch(`/api/scans/${id}/ai`);
+        if (stored.ok) {
+          const sa = (await stored.json()) as ScanAi;
+          const map: Record<number, Assessment> = {};
+          for (const as of sa.assessments || []) map[as.finding_idx] = as;
+          setAssessments(map);
+          setPrioritization(sa.prioritization || null);
+        }
       } catch {
         setState("missing");
       }
     })();
   }, [id]);
 
+  const runAgents = useCallback(async () => {
+    setRunning(true);
+    setAiError("");
+    setProgress("Contacting the AI provider…");
+    try {
+      const res = await fetch(`/api/scans/${id}/agents`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({}),
+      });
+      await readSse(res, (event, data) => {
+        if (event === "start") {
+          setProgress(`Running ${(data.agents || []).join(", ")} with ${data.provider} on ${data.findings} finding(s)…`);
+        } else if (event === "assessed") {
+          setAssessments((prev) => ({
+            ...prev,
+            [data.idx]: {
+              finding_idx: data.idx,
+              is_false_positive: data.triage ? data.triage.is_false_positive : null,
+              confidence: data.triage ? data.triage.confidence : null,
+              rationale: data.triage ? data.triage.rationale : "",
+              remediation_summary: data.remediation ? data.remediation.summary : null,
+              remediation: data.remediation ? data.remediation.remediation : null,
+            },
+          }));
+          setProgress(`Assessed finding #${data.idx + 1}…`);
+        } else if (event === "prioritized") {
+          setPrioritization(data as Prioritization);
+          setProgress("Prioritizing…");
+        } else if (event === "agents_done") {
+          setProgress("");
+        } else if (event === "agents_error") {
+          setAiError(data.message || "AI analysis failed.");
+        } else if (event === "agent_error") {
+          setAiError(`${data.agent}: ${data.message}`);
+        }
+      });
+    } catch {
+      setAiError("AI analysis could not be reached.");
+    } finally {
+      setRunning(false);
+      setProgress("");
+    }
+  }, [id]);
+
   const findings: Finding[] = scan?.findings || [];
   const high = findings.filter((f) => f.severity === "high" || f.severity === "critical").length;
   const stack = scan ? Object.values(scan.frameworks || {}).filter(Boolean).join(", ") || "—" : "—";
+
+  const rankByIdx: Record<number, RankItem> = {};
+  (prioritization?.ranking || []).forEach((r) => (rankByIdx[r.idx] = r));
+  const order = prioritization?.ranking?.length
+    ? prioritization.ranking.map((r) => r.idx).filter((i) => i >= 0 && i < findings.length)
+    : findings.map((_, i) => i);
+  // Any finding missing from the ranking keeps a place at the end.
+  findings.forEach((_, i) => {
+    if (!order.includes(i)) order.push(i);
+  });
 
   return (
     <div className="shell">
@@ -67,6 +179,30 @@ export default function ScanDetail({ params }: { params: { id: string } }) {
             <div className="kpi"><div className="cap">Stack</div><div className="big sm">{stack}</div></div>
           </div>
 
+          {ai?.enabled && findings.length > 0 && (
+            <div className="card ai-run">
+              <div className="card-head">
+                <h2>AI analysis</h2>
+                <span className="spacer" />
+                <button className="btn btn-primary" onClick={runAgents} disabled={running}>
+                  {running ? "Analyzing…" : prioritization || Object.keys(assessments).length ? "Re-run AI analysis" : "Run AI analysis"}
+                </button>
+              </div>
+              {progress && <p className="ai-progress">{progress}</p>}
+              {aiError && <p className="ai-err">{aiError}</p>}
+              <p className="ai-note">
+                Triage, remediation and risk ranking run on {ai.providers.join(" / ") || "the configured provider"}.
+                Running them sends the relevant code snippets to that provider.
+              </p>
+              {prioritization?.summary && (
+                <div className="ai-summary">
+                  <div className="eyebrow">Risk posture</div>
+                  <p>{prioritization.summary}</p>
+                </div>
+              )}
+            </div>
+          )}
+
           <div className="card">
             <div className="card-head">
               <h2>Findings</h2>
@@ -83,7 +219,15 @@ export default function ScanDetail({ params }: { params: { id: string } }) {
               {findings.length === 0 ? (
                 <div className="empty">No vulnerabilities were found in this scan.</div>
               ) : (
-                findings.map((f, i) => <FindingCard key={i} finding={f} defaultOpen={i === 0} />)
+                order.map((origIdx, pos) => (
+                  <FindingCard
+                    key={origIdx}
+                    finding={findings[origIdx]}
+                    defaultOpen={pos === 0}
+                    assessment={assessments[origIdx]}
+                    rank={rankByIdx[origIdx]}
+                  />
+                ))
               )}
             </div>
           </div>
