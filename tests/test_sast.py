@@ -1489,6 +1489,17 @@ class TestMishandledExceptions(unittest.TestCase):
         # logging the exception server-side is the safe form, not a leak
         self.assertNotIn("error_info_leak",
                          {f.vuln for f in scan_text("a.py", "    logger.error(str(e))\n")})
+        # Flask's request.args is not an exception's .args (review regression)
+        for line in ("    return jsonify(request.args)\n",
+                     '    return make_response(request.args.get("q"), 200)\n'):
+            self.assertNotIn("error_info_leak",
+                             {f.vuln for f in scan_text("a.py", line)}, line)
+        self.assertIn("error_info_leak",
+                      {f.vuln for f in scan_text("a.py", "    return jsonify(detail=e.args)\n")})
+        # a benign getMessage() on a non-exception receiver is not a leak (review regression)
+        for line in ("    echo $user->getMessage();\n", "    echo $event->getMessage();\n"):
+            self.assertNotIn("error_info_leak",
+                             {f.vuln for f in scan_text("a.php", line)}, line)
 
     def test_existing_samples_have_no_a10_findings(self):
         a10 = {"error_info_leak", "swallowed_exception"}

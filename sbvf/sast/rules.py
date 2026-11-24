@@ -334,10 +334,16 @@ RULES: List[Rule] = [
                    r"^\s*return\s+[^#]*traceback\s*\.\s*format_exc\s*\(",
                    r"\b(?:jsonify|JsonResponse|HttpResponse\w*|Response|make_response|abort)\s*\("
                    r"[^#]*(?:str\s*\(\s*(?:e|ex|exc|err|error|exception)\s*\)|"
-                   r"traceback\s*\.\s*format_exc\s*\(|\.\s*args\b)"],
-            # echoing / printing the exception message or trace to output
-            "php": [r"\b(?:echo|print|printf|vprintf|die|exit)\b[^;]*->\s*getMessage\s*\(",
-                    r"\b(?:echo|print|printf|die|exit)\b[^;]*->\s*getTraceAsString\s*\(",
+                   r"traceback\s*\.\s*format_exc\s*\(|"
+                   # an exception's .args — NOT Flask's request.args / form.args
+                   r"\b(?:e|ex|exc|err|error|exception)\s*\.\s*args\b)"],
+            # echoing / printing the exception message or trace to output. The
+            # receiver is constrained to an exception-named var so a benign
+            # $user->getMessage() (chat/notification) is not flagged.
+            "php": [r"\b(?:echo|print|printf|vprintf|die|exit)\b[^;]*"
+                    r"\$(?:exception|error|throwable|err|exc|ex|e)\b\s*->\s*getMessage\s*\(",
+                    r"\b(?:echo|print|printf|die|exit)\b[^;]*"
+                    r"\$(?:exception|error|throwable|err|exc|ex|e)\b\s*->\s*getTraceAsString\s*\(",
                     r"\b(?:print_r|var_dump|var_export)\s*\(\s*\$\w*(?:exception|error|err)\w*\b"],
             # writing the error object / its stack or message into the HTTP response
             "js": [r"\.\s*(?:send|json|write|end)\s*\([^;]*\b(?:err|error|exception|ex)\s*\.\s*(?:stack|message)\b",
