@@ -9,11 +9,13 @@ from __future__ import annotations
 
 import os
 import threading
+import time
 from typing import Optional
 
 _pool = None
-_init_done = False
 _lock = threading.Lock()
+_last_fail = 0.0
+_RETRY_AFTER = 30.0  # seconds to wait before retrying pool creation after a failure
 
 
 def database_url() -> Optional[str]:
@@ -39,44 +41,48 @@ def is_enabled() -> bool:
 def get_pool():
     """Return a shared connection pool, or None if persistence is unavailable.
 
-    Safe to call repeatedly; the pool is created once. Any failure (missing
-    driver, bad URL, server down) is swallowed and reported as None so callers
-    degrade gracefully.
+    Created once and reused. A creation failure (missing driver, bad URL, server
+    down) is swallowed and reported as None so callers degrade gracefully; it is
+    retried after ``_RETRY_AFTER`` seconds rather than disabling persistence for
+    the whole process lifetime after a transient blip.
     """
-    global _pool, _init_done
-    if _init_done:
+    global _pool, _last_fail
+    if _pool is not None:
         return _pool
+    url = database_url()
+    if not url:
+        return None
     with _lock:
-        if _init_done:
+        if _pool is not None:
             return _pool
-        _init_done = True
-        url = database_url()
-        if not url:
-            return None
+        if _last_fail and (time.monotonic() - _last_fail) < _RETRY_AFTER:
+            return None  # still in the backoff window
         try:
             from psycopg_pool import ConnectionPool  # lazy: optional dependency
 
-            _pool = ConnectionPool(
+            pool = ConnectionPool(
                 conninfo=url, min_size=1, max_size=int(os.environ.get("SBVF_DB_POOL", "5")),
                 kwargs={"autocommit": False}, open=True, timeout=10,
             )
             # Validate connectivity once up front.
-            with _pool.connection() as conn:
+            with pool.connection() as conn:
                 conn.execute("SELECT 1")
+            _pool = pool
+            _last_fail = 0.0
             return _pool
         except Exception as exc:  # driver missing / server unreachable
-            print(f"[sbvf.store] persistence disabled: {exc}")
-            _pool = None
+            print(f"[sbvf.store] persistence unavailable (will retry): {exc}")
+            _last_fail = time.monotonic()
             return None
 
 
 def reset_for_tests() -> None:
     """Drop the cached pool so a test can reconfigure the environment."""
-    global _pool, _init_done
+    global _pool, _last_fail
     try:
         if _pool is not None:
             _pool.close()
     except Exception:
         pass
     _pool = None
-    _init_done = False
+    _last_fail = 0.0

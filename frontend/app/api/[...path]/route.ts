@@ -1,9 +1,10 @@
 import { NextRequest } from "next/server";
 
-// Stream the Python SBVF API (SSE) through this handler so the browser talks
-// same-origin and Server-Sent Events are forwarded incrementally (next rewrites
-// buffer them). Node runtime + force-dynamic + passing the upstream ReadableStream
-// straight through keeps the stream live.
+// Proxy the Python SBVF API through this handler so the browser talks same-origin.
+// GET is streamed incrementally (SSE: next rewrites buffer them); other methods
+// (DELETE, and later POST) are forwarded and their JSON response returned.
+// Node runtime + force-dynamic + passing the upstream ReadableStream straight
+// through keeps SSE live.
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
@@ -32,4 +33,31 @@ export async function GET(req: NextRequest, ctx: { params: { path: string[] } })
       "X-Accel-Buffering": "no",
     },
   });
+}
+
+// Forward a non-streaming method (DELETE now; POST added with Phase 2) and relay
+// the upstream JSON response verbatim.
+async function forward(req: NextRequest, ctx: { params: { path: string[] } }, method: string) {
+  const target = `${API}/api/${ctx.params.path.join("/")}${req.nextUrl.search}`;
+  const hasBody = method !== "DELETE" && method !== "GET";
+  let upstream: Response;
+  try {
+    upstream = await fetch(target, {
+      method,
+      cache: "no-store",
+      headers: hasBody ? { "content-type": req.headers.get("content-type") || "application/json" } : undefined,
+      body: hasBody ? await req.text() : undefined,
+    });
+  } catch {
+    return Response.json({ message: `cannot reach backend at ${API}` }, { status: 502 });
+  }
+  const body = await upstream.text();
+  return new Response(body, {
+    status: upstream.status,
+    headers: { "Content-Type": upstream.headers.get("content-type") || "application/json" },
+  });
+}
+
+export function DELETE(req: NextRequest, ctx: { params: { path: string[] } }) {
+  return forward(req, ctx, "DELETE");
 }

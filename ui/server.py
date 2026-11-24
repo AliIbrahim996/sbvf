@@ -82,7 +82,7 @@ class UIHandler(BaseHTTPRequestHandler):
             return self._list_scans(urllib.parse.parse_qs(parsed.query))
 
         if parsed.path.startswith("/api/scans/"):
-            return self._get_scan(parsed.path.rsplit("/", 1)[-1])
+            return self._get_scan(parsed.path.rstrip("/").rsplit("/", 1)[-1])
 
         if parsed.path == "/api/activity":
             return self._list_activity(urllib.parse.parse_qs(parsed.query))
@@ -93,7 +93,7 @@ class UIHandler(BaseHTTPRequestHandler):
     def do_DELETE(self):
         parsed = urllib.parse.urlparse(self.path)
         if parsed.path.startswith("/api/scans/"):
-            return self._delete_scan(parsed.path.rsplit("/", 1)[-1])
+            return self._delete_scan(parsed.path.rstrip("/").rsplit("/", 1)[-1])
         self.send_response(404)
         self.end_headers()
 
