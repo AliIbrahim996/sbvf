@@ -48,4 +48,5 @@ export const SAMPLES: { value: string; label: string }[] = [
   { value: "node_nestjs", label: "Node.js · NestJS" },
   { value: "idor_django", label: "IDOR · Django (A01)" },
   { value: "crypto_py", label: "Crypto failures · Python (A04)" },
+  { value: "misconfig_py", label: "Security misconfig · Python (A02)" },
 ];

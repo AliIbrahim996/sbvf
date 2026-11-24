@@ -190,6 +190,59 @@ VULN_INFO = {
             "Never derive secrets from time, uniqid() or a seeded generator.",
         ],
     },
+    # --- OWASP A02: Security Misconfiguration (sbvf/sast/rules.py) ------------
+    "debug_enabled": {
+        "cwe": "CWE-489", "severity": "high", "title": "Debug Mode Enabled",
+        "desc": "A debug/development flag is turned on (DEBUG=True, app.debug, WP_DEBUG).",
+        "owner": "Backend / DevOps", "exposure": ["Systems", "Data"],
+        "impact": "Debug mode returns stack traces, source and configuration to users, "
+                  "leaking secrets and internals; some debuggers (e.g. Werkzeug) allow "
+                  "arbitrary code execution on the server.",
+        "fix": [
+            "Disable debug in production; drive it from an environment variable that defaults off.",
+            "Return generic error pages and log details server-side only.",
+            "Verify the deployed build has DEBUG/APP_DEBUG false.",
+        ],
+    },
+    "permissive_cors": {
+        "cwe": "CWE-942", "severity": "medium", "title": "Permissive CORS Policy",
+        "desc": "Cross-Origin Resource Sharing allows any origin (wildcard or reflected).",
+        "owner": "Backend / platform", "exposure": ["Data", "Accounts"],
+        "impact": "Any website can make credentialed requests and read the responses, so "
+                  "a malicious page can exfiltrate a logged-in user's data from this API.",
+        "fix": [
+            "Allow only an explicit list of trusted origins; never '*' with credentials.",
+            "Echo an origin back only after checking it against the allow-list.",
+            "Scope CORS to the routes that truly need it.",
+        ],
+    },
+    "insecure_cookie": {
+        "cwe": "CWE-614", "severity": "medium", "title": "Insecure Cookie Flags",
+        "desc": "A session or security cookie is set without the Secure and/or HttpOnly flag.",
+        "owner": "Backend / auth", "exposure": ["Accounts"],
+        "impact": "Without Secure the cookie is sent over plain HTTP and can be sniffed; "
+                  "without HttpOnly it is readable by JavaScript, so an XSS turns into "
+                  "session theft and account takeover.",
+        "fix": [
+            "Set Secure, HttpOnly and SameSite on session/auth cookies.",
+            "In Django set SESSION_COOKIE_SECURE / CSRF_COOKIE_SECURE / *_HTTPONLY to True.",
+            "Serve the app over HTTPS only.",
+        ],
+    },
+    "security_misconfig": {
+        "cwe": "CWE-16", "severity": "medium", "title": "Security Misconfiguration",
+        "desc": "An insecure setting (wildcard ALLOWED_HOSTS, verbose error display, "
+                "server fingerprint exposure).",
+        "owner": "Backend / DevOps", "exposure": ["Systems", "Data"],
+        "impact": "Loose configuration widens the attack surface: wildcard hosts enable "
+                  "host-header attacks, verbose errors leak internals, and exposed version "
+                  "banners help attackers target known flaws.",
+        "fix": [
+            "Pin ALLOWED_HOSTS to the real domains; disable display_errors/expose_php in production.",
+            "Harden defaults and remove sample/admin endpoints before deploy.",
+            "Review the deployment against a security configuration checklist.",
+        ],
+    },
 }
 
 # Severity ordering for sorting the report (most serious first).

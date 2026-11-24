@@ -223,6 +223,61 @@ RULES: List[Rule] = [
                 r"crypto\s*\.\s*(?:randomBytes|randomUUID|getRandomValues)|openssl_random)",
         message="Predictable pseudo-random generator used to produce a token, key or "
                 "other secret value."),
+
+    # ----------------------------------------------------------------------
+    # A02 - Security Misconfiguration
+    # ----------------------------------------------------------------------
+    Rule(
+        id="A02-debug-enabled", vuln="debug_enabled",
+        patterns={
+            "py": [r"\bDEBUG\s*=\s*True\b",
+                   r"\bapp\s*\.\s*debug\s*=\s*True\b",
+                   r"\.run\s*\([^)]*\bdebug\s*=\s*True",
+                   r"\bFLASK_DEBUG\b\s*=\s*['\"]?1"],
+            "php": [r"\bdefine\s*\(\s*['\"]WP_DEBUG['\"]\s*,\s*true",
+                    r"\bAPP_DEBUG\b['\"]?\s*(?:,|=>|=)\s*true"],
+            "js": [r"\bdebug\s*:\s*true\b"],
+        },
+        message="Debug mode is enabled. Debuggers and stack traces expose source, "
+                "configuration and secrets, and some allow remote code execution."),
+    Rule(
+        id="A02-permissive-cors", vuln="permissive_cors",
+        patterns={
+            "py": [r"['\"]Access-Control-Allow-Origin['\"]\s*[:,]\s*['\"]\*['\"]",
+                   r"\bCORS\s*\(\s*app\s*\)",
+                   r"\borigins\s*=\s*\[\s*['\"]\*['\"]"],
+            "js": [r"\bcors\s*\(\s*\)",
+                   r"\borigin\s*:\s*['\"]\*['\"]",
+                   r"\borigin\s*:\s*true\b",
+                   r"['\"]Access-Control-Allow-Origin['\"]\s*,\s*['\"]\*['\"]"],
+            "php": [r"header\s*\(\s*['\"]Access-Control-Allow-Origin:\s*\*"],
+        },
+        message="Cross-Origin Resource Sharing allows any origin ('*' / reflected), "
+                "letting any website read authenticated responses from this service."),
+    Rule(
+        id="A02-insecure-cookie", vuln="insecure_cookie",
+        patterns={
+            "py": [r"\bhttponly\s*=\s*False\b", r"\bsecure\s*=\s*False\b",
+                   r"\bSESSION_COOKIE_(?:SECURE|HTTPONLY)\s*=\s*False\b",
+                   r"\bCSRF_COOKIE_(?:SECURE|HTTPONLY)\s*=\s*False\b"],
+            "js": [r"\bhttpOnly\s*:\s*false\b", r"\bsecure\s*:\s*false\b"],
+            "php": [r"['\"]http_?only['\"]\s*=>\s*false", r"['\"]secure['\"]\s*=>\s*false",
+                    r"\bsession\.cookie_(?:httponly|secure)\b['\"]?\s*,\s*(?:0|false)"],
+        },
+        require=r"(?i)cookie|session|csrf|httponly|secure",
+        message="A session/security cookie is set without the Secure and/or HttpOnly "
+                "flag, exposing it to theft over plain HTTP or via JavaScript (XSS)."),
+    Rule(
+        id="A02-misconfig", vuln="security_misconfig",
+        patterns={
+            "py": [r"\bALLOWED_HOSTS\s*=\s*\[\s*['\"]\*['\"]\s*\]"],
+            "php": [r"\bini_set\s*\(\s*['\"]display_errors['\"]\s*,\s*['\"]?(?:1|on|true)",
+                    r"\bexpose_php\b['\"]?\s*,\s*['\"]?(?:1|on|true)",
+                    r"\bdisplay_errors\b['\"]?\s*,\s*['\"]?(?:1|on|true)"],
+            "js": [],
+        },
+        message="Insecure configuration (wildcard ALLOWED_HOSTS, verbose error "
+                "display, or server fingerprint exposure) that eases attacks."),
 ]
 
 
