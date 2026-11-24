@@ -40,7 +40,7 @@ export default function Page() {
   useEffect(() => {
     const cur = document.documentElement.getAttribute("data-theme");
     if (cur === "light" || cur === "dark") setTheme(cur);
-    else setTheme(window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light");
+    else setTheme("dark");
   }, []);
 
   function toggleTheme() {
@@ -164,10 +164,10 @@ export default function Page() {
       </nav>
 
       <header className="hero">
-        <h1>See how it got in, what it costs, and how to close it.</h1>
+        <h1>Find the flaw. See the cost. Close the gap.</h1>
         <p>
-          SBVF combines static taint analysis with search-based testing to surface real
-          web vulnerabilities — then explains each one in plain business terms.
+          SBVF pairs static taint analysis with search-based testing to surface real web
+          vulnerabilities — each one explained in plain business terms, not just a CWE number.
         </p>
       </header>
 
