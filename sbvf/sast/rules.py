@@ -236,7 +236,9 @@ RULES: List[Rule] = [
                    r"\bFLASK_DEBUG\b\s*=\s*['\"]?1"],
             "php": [r"\bdefine\s*\(\s*['\"]WP_DEBUG['\"]\s*,\s*true",
                     r"\bAPP_DEBUG\b['\"]?\s*(?:,|=>|=)\s*true"],
-            "js": [r"\bdebug\s*:\s*true\b"],
+            # No generic JS rule: a bare `debug: true` object key is far too
+            # common in benign build/logger/test config to flag on its own.
+            "js": [],
         },
         message="Debug mode is enabled. Debuggers and stack traces expose source, "
                 "configuration and secrets, and some allow remote code execution."),
@@ -264,7 +266,10 @@ RULES: List[Rule] = [
             "php": [r"['\"]http_?only['\"]\s*=>\s*false", r"['\"]secure['\"]\s*=>\s*false",
                     r"\bsession\.cookie_(?:httponly|secure)\b['\"]?\s*,\s*(?:0|false)"],
         },
-        require=r"(?i)cookie|session|csrf|httponly|secure",
+        # Context filter: the line must actually be about a cookie/session, so an
+        # unrelated `secure=False` / `httponly=False` kwarg (e.g. a DB driver
+        # connect) is not misreported as an insecure cookie.
+        require=r"(?i)cookie|session|csrf",
         message="A session/security cookie is set without the Secure and/or HttpOnly "
                 "flag, exposing it to theft over plain HTTP or via JavaScript (XSS)."),
     Rule(

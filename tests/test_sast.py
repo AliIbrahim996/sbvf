@@ -1243,10 +1243,17 @@ class TestSecurityMisconfig(unittest.TestCase):
         self.assertIn(("insecure_cookie", self._line("SESSION_COOKIE_SECURE = False")), got)
         self.assertIn(("permissive_cors", self._line("CORS(app)")), got)
 
-    def test_safe_counterpart_not_flagged(self):
+    def test_each_rule_present_exactly(self):
         self.assertSetEqual(
             {v for v, _ in _vulns(self.r)},
             {"debug_enabled", "security_misconfig", "insecure_cookie", "permissive_cors"})
+
+    def test_safe_counterpart_not_flagged(self):
+        # Scan the hardened file in isolation: a false positive here would be
+        # invisible if we only checked the vuln *set* of the whole directory.
+        from sbvf.sast.rules import scan_text
+        safe = open(os.path.join(SAMPLES, "misconfig_py", "safe.py")).read()
+        self.assertEqual([f.vuln for f in scan_text("safe.py", safe)], [])
 
     def test_metadata(self):
         f = {x["vuln"]: x for x in self.r["findings"]}
@@ -1279,6 +1286,18 @@ class TestSecurityMisconfig(unittest.TestCase):
                      "SESSION_COOKIE_SECURE = True\n",
                      'CORS(app, origins=["https://app.example.com"])\n'):
             self.assertEqual(self._scan("a.py", safe), set(), safe)
+
+    def test_rule_precision(self):
+        from sbvf.sast.rules import scan_text
+        # a bare JS `debug: true` object key is benign config, not a finding
+        self.assertNotIn("debug_enabled",
+            [f.vuln for f in scan_text("webpack.config.js",
+                "module.exports = { devtool: 'source-map', debug: true };")])
+        # a non-cookie `secure=False` kwarg must not be misreported as a cookie
+        for line in ("conn = driver.connect(host=h, secure=False)",
+                     "client = Thing(secure=False)"):
+            self.assertNotIn("insecure_cookie",
+                [f.vuln for f in scan_text("a.py", line)], line)
 
     def test_existing_samples_have_no_misconfig_findings(self):
         misconfig_vulns = {"debug_enabled", "security_misconfig",
