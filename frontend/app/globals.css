@@ -562,3 +562,52 @@ footer { margin-top: 30px; color: var(--faint); font-size: 12px; text-align: cen
   .askform .btn-primary { width: 100%; justify-content: center; }
   .bubble { max-width: 100%; }
 }
+
+/* ===========================================================================
+   Detection path (A: how the scanner reached the finding) — animated graph
+   =========================================================================== */
+.panel.dpath { padding-top: 16px; }
+.eyebrow.dp { color: var(--accent-ink); }
+.dpcount { margin-left: auto; font-weight: 600; letter-spacing: 0; text-transform: none;
+  font-size: 11.5px; color: var(--muted); }
+
+.dpgraph { list-style: none; margin: 4px 0 0; padding: 0; position: relative; }
+.dpnode { position: relative; display: flex; align-items: flex-start; gap: 12px;
+  padding: 7px 0; }
+/* connector up to the previous dot (18px dot-centre = 7px pad + 18px radius) */
+.dpnode::before { content: ""; position: absolute; left: 17px; top: -9px; width: 2px; height: 16px;
+  background: var(--line-strong); border-radius: 2px; transition: background .25s ease; }
+.dpnode:first-child::before { display: none; }
+.dpnode.done::before, .dpnode.active::before { background: var(--accent); }
+
+.dpdot { flex: 0 0 auto; width: 36px; height: 36px; border-radius: 50%; display: grid;
+  place-items: center; cursor: pointer; padding: 0; background: var(--surface-2);
+  border: 1px solid var(--line-strong); color: var(--muted);
+  transition: transform .2s ease, box-shadow .2s ease, background .2s ease, color .2s ease, border-color .2s ease; }
+.dpdot svg { width: 17px; height: 17px; }
+.dpnode.done .dpdot { background: var(--accent-soft); border-color: color-mix(in srgb, var(--accent) 40%, transparent);
+  color: var(--accent-ink); }
+.dpnode.active .dpdot { background: var(--accent); border-color: var(--accent); color: #fff;
+  transform: scale(1.12); box-shadow: 0 0 0 5px color-mix(in srgb, var(--accent) 22%, transparent); }
+.dpnode.next .dpdot { opacity: .7; }
+.dpnode.k-sink.active .dpdot, .dpnode.k-vuln.active .dpdot {
+  background: var(--crit); border-color: var(--crit);
+  box-shadow: 0 0 0 5px color-mix(in srgb, var(--crit) 22%, transparent); }
+.dpnode.k-sink.done .dpdot, .dpnode.k-vuln.done .dpdot {
+  background: var(--crit-soft); border-color: color-mix(in srgb, var(--crit) 40%, transparent); color: var(--crit); }
+
+.dptext { padding-top: 7px; min-width: 0; }
+.dptitle { font-size: 13.5px; font-weight: 650; color: var(--ink); line-height: 1.2; }
+.dpnode.next .dptitle { color: var(--muted); font-weight: 600; }
+.dpmeta { display: inline-block; margin-top: 3px; font-family: var(--font-mono-stack);
+  font-size: 11.5px; color: var(--muted); word-break: break-all; }
+
+.dpnarr { margin: 12px 0 0 !important; min-height: 2.6em; background: var(--surface-2);
+  border: 1px solid var(--line); border-left: 3px solid var(--accent); border-radius: 8px;
+  padding: 11px 13px; font-size: 13.5px; line-height: 1.6; color: var(--ink-soft) !important; }
+
+.dpctl { display: flex; align-items: center; justify-content: center; gap: 10px; margin-top: 13px; }
+.dpctl .btn { padding: 8px 12px; }
+.dpctl .btn svg { width: 15px; height: 15px; }
+.dpctl .dpplay { min-width: 104px; justify-content: center; gap: 7px; }
+.dpctl .btn:disabled { opacity: .4; cursor: default; }

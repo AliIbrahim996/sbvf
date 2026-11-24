@@ -15,6 +15,7 @@ export interface Finding {
   param?: string;
   method?: string;
   function?: string;
+  rule?: string;
   how_in?: string;
   impact?: string;
   fix?: string[];
