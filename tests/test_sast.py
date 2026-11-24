@@ -1190,11 +1190,13 @@ class TestCryptoFailures(unittest.TestCase):
             self.assertEqual(self._scan("a.php", safe), set(), safe)
 
     def test_existing_samples_have_no_crypto_findings(self):
+        crypto_vulns = {"weak_crypto", "broken_tls", "hardcoded_secret", "weak_random"}
         for name in os.listdir(SAMPLES):
             if name == "crypto_py":
                 continue
             r = scan_path(os.path.join(SAMPLES, name))
-            self.assertFalse([f for f in r["findings"] if f["rule"]], name)
+            self.assertFalse(
+                [f for f in r["findings"] if f["vuln"] in crypto_vulns], name)
 
 
 class TestCryptoRulePrecision(unittest.TestCase):
@@ -1221,6 +1223,91 @@ class TestCryptoRulePrecision(unittest.TestCase):
     def test_weak_random_bare_key_not_context(self):
         # a standalone 'key' is no longer enough context for weak-random
         self.assertNotIn("weak_random", self._v("chosen = random.choice(the_key_list)"))
+
+
+class TestSecurityMisconfig(unittest.TestCase):
+    """OWASP A02: config pattern rules fire on the misconfigured sample, not on
+    the hardened counterpart."""
+
+    def setUp(self):
+        self.r = scan_path(os.path.join(SAMPLES, "misconfig_py"))
+        self.src = open(os.path.join(SAMPLES, "misconfig_py", "app.py")).read().splitlines()
+
+    def _line(self, needle):
+        return next(i for i, l in enumerate(self.src, 1) if needle in l)
+
+    def test_each_rule_fires_on_vulnerable_code(self):
+        got = _vulns(self.r)
+        self.assertIn(("debug_enabled", self._line("DEBUG = True")), got)
+        self.assertIn(("security_misconfig", self._line('ALLOWED_HOSTS = ["*"]')), got)
+        self.assertIn(("insecure_cookie", self._line("SESSION_COOKIE_SECURE = False")), got)
+        self.assertIn(("permissive_cors", self._line("CORS(app)")), got)
+
+    def test_each_rule_present_exactly(self):
+        self.assertSetEqual(
+            {v for v, _ in _vulns(self.r)},
+            {"debug_enabled", "security_misconfig", "insecure_cookie", "permissive_cors"})
+
+    def test_safe_counterpart_not_flagged(self):
+        # Scan the hardened file in isolation: a false positive here would be
+        # invisible if we only checked the vuln *set* of the whole directory.
+        from sbvf.sast.rules import scan_text
+        safe = open(os.path.join(SAMPLES, "misconfig_py", "safe.py")).read()
+        self.assertEqual([f.vuln for f in scan_text("safe.py", safe)], [])
+
+    def test_metadata(self):
+        f = {x["vuln"]: x for x in self.r["findings"]}
+        self.assertEqual((f["debug_enabled"]["cwe"], f["debug_enabled"]["severity"]), ("CWE-489", "high"))
+        self.assertEqual((f["permissive_cors"]["cwe"], f["permissive_cors"]["severity"]), ("CWE-942", "medium"))
+        self.assertEqual((f["insecure_cookie"]["cwe"], f["insecure_cookie"]["severity"]), ("CWE-614", "medium"))
+        self.assertEqual((f["security_misconfig"]["cwe"], f["security_misconfig"]["severity"]), ("CWE-16", "medium"))
+        for x in f.values():
+            self.assertTrue(x["fix"] and x["impact"] and x["owner"] and x["exposure"] and x["how_in"])
+
+    def test_streams_finding_steps(self):
+        steps = []
+        scan_path(os.path.join(SAMPLES, "misconfig_py"), on_step=steps.append)
+        self.assertTrue(sum(1 for s in steps if s.kind == "finding") >= 4)
+
+    def _scan(self, name, code):
+        with tempfile.TemporaryDirectory() as d:
+            with open(os.path.join(d, name), "w") as fh:
+                fh.write(code)
+            return {f["vuln"] for f in scan_path(d)["findings"]}
+
+    def test_python_variants(self):
+        self.assertIn("debug_enabled", self._scan("a.py", "DEBUG = True\n"))
+        self.assertIn("debug_enabled", self._scan("a.py", "app.run(debug=True)\n"))
+        self.assertIn("security_misconfig", self._scan("a.py", 'ALLOWED_HOSTS = ["*"]\n'))
+        self.assertIn("insecure_cookie", self._scan("a.py", "SESSION_COOKIE_SECURE = False\n"))
+        self.assertIn("permissive_cors", self._scan("a.py", "CORS(app)\n"))
+        for safe in ("DEBUG = False\n",
+                     'ALLOWED_HOSTS = ["app.example.com"]\n',
+                     "SESSION_COOKIE_SECURE = True\n",
+                     'CORS(app, origins=["https://app.example.com"])\n'):
+            self.assertEqual(self._scan("a.py", safe), set(), safe)
+
+    def test_rule_precision(self):
+        from sbvf.sast.rules import scan_text
+        # a bare JS `debug: true` object key is benign config, not a finding
+        self.assertNotIn("debug_enabled",
+            [f.vuln for f in scan_text("webpack.config.js",
+                "module.exports = { devtool: 'source-map', debug: true };")])
+        # a non-cookie `secure=False` kwarg must not be misreported as a cookie
+        for line in ("conn = driver.connect(host=h, secure=False)",
+                     "client = Thing(secure=False)"):
+            self.assertNotIn("insecure_cookie",
+                [f.vuln for f in scan_text("a.py", line)], line)
+
+    def test_existing_samples_have_no_misconfig_findings(self):
+        misconfig_vulns = {"debug_enabled", "security_misconfig",
+                           "insecure_cookie", "permissive_cors"}
+        for name in os.listdir(SAMPLES):
+            if name == "misconfig_py":
+                continue
+            r = scan_path(os.path.join(SAMPLES, name))
+            self.assertFalse(
+                [f for f in r["findings"] if f["vuln"] in misconfig_vulns], name)
 
 
 if __name__ == "__main__":
