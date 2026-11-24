@@ -4,13 +4,13 @@
 # (e.g. http://sbvf:8080). See docker-compose.yml.
 
 # ---- deps: install node_modules from the lockfile ---------------------------
-FROM node:20-alpine AS deps
+FROM node:24-alpine3.22 AS deps
 WORKDIR /app
 COPY package.json package-lock.json ./
 RUN npm ci
 
 # ---- build: compile the standalone output -----------------------------------
-FROM node:20-alpine AS build
+FROM node:24-alpine3.22 AS build
 WORKDIR /app
 COPY --from=deps /app/node_modules ./node_modules
 COPY . .
@@ -18,13 +18,14 @@ ENV NEXT_TELEMETRY_DISABLED=1
 RUN npm run build
 
 # ---- run: minimal runtime image ---------------------------------------------
-FROM node:20-alpine AS runner
+FROM node:24-alpine3.22 AS runner
 WORKDIR /app
 ENV NODE_ENV=production \
     NEXT_TELEMETRY_DISABLED=1 \
     PORT=3000 \
     HOSTNAME=0.0.0.0
 RUN addgroup -g 1001 -S nodejs && adduser -S nextjs -u 1001
+RUN apk upgrade --no-cache
 
 # Standalone output ships its own minimal server + the pruned node_modules.
 COPY --from=build /app/public ./public
