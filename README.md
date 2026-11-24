@@ -8,6 +8,20 @@ Algorithm (GA), Cuckoo Search (CS) and Random Search (RS) for detecting **XSS**,
 > Applications Vulnerabilities* — Tishreen University, Faculty of Informatics
 > Engineering.
 
+## Web dashboard
+
+A modern Next.js dashboard (in `frontend/`) talks to the Python SSE backend: a
+landing page, a live scanner that streams every analysis step, finding cards that
+explain *how it got in*, *business impact* and *how to close it*, and a one-click
+PDF report. Light and dark themes.
+
+| Landing | Live scanner | Finding detail |
+| --- | --- | --- |
+| ![Landing page](assets/screenshots/landing.jpg) | ![Live scanner](assets/screenshots/dashboard.jpg) | ![Finding detail](assets/screenshots/finding.jpg) |
+
+Run it with Docker Compose (`docker compose up` → UI on `http://localhost:3000`,
+API on `:8080`), or in dev with `python -m ui.server` and `npm run dev` in `frontend/`.
+
 ## Ethics & safety
 
 All targets run on `127.0.0.1`. The framework **refuses non-local hosts** unless
