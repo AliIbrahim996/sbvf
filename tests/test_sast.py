@@ -1358,8 +1358,11 @@ class TestInsecureDeserialization(unittest.TestCase):
         self.assertIn("insecure_deserialization", self._scan("a.py", "import marshal\nx = marshal.loads(b)\n"))
         self.assertIn("insecure_deserialization", self._scan("a.py", "import jsonpickle\nx = jsonpickle.decode(s)\n"))
         self.assertIn("insecure_deserialization", self._scan("a.py", "import yaml\nx = yaml.load(s)\n"))
+        self.assertIn("insecure_deserialization", self._scan("a.py", "import yaml\nx = yaml.unsafe_load(s)\n"))
+        self.assertIn("insecure_deserialization", self._scan("a.py", "import yaml\nx = yaml.load_all(s)\n"))
         for safe in ("import json\nx = json.loads(s)\n",
                      "import yaml\nx = yaml.safe_load(s)\n",
+                     "import yaml\nx = yaml.safe_load_all(s)\n",
                      "import yaml\nx = yaml.load(s, Loader=yaml.SafeLoader)\n",
                      "import yaml\nx = yaml.load(s, Loader=yaml.BaseLoader)\n"):
             self.assertEqual(self._scan("a.py", safe), set(), safe)
@@ -1373,9 +1376,11 @@ class TestInsecureDeserialization(unittest.TestCase):
 
     def test_js_variants(self):
         self.assertIn("insecure_deserialization",
-                      self._scan("a.js", "const s = require('node-serialize');\nconst o = s.unserialize(p);\n"))
+                      self._scan("a.js", "const serialize = require('node-serialize');\nconst o = serialize.unserialize(p);\n"))
         for safe in ("const o = JSON.parse(p);\n",
-                     "const o = serialize.serialize(p);\n"):
+                     "const o = serialize.serialize(p);\n",
+                     # an unrelated in-house unserialize() must not be flagged
+                     "const o = myCache.unserialize(row);\n"):
             self.assertEqual(self._scan("a.js", safe), set(), safe)
 
     def test_precision(self):
