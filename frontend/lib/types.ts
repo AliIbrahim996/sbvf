@@ -37,6 +37,42 @@ export interface ScanStep {
   data?: Record<string, unknown>;
 }
 
+// Row returned by GET /api/scans (list view).
+export interface ScanSummary {
+  id: number;
+  created_at: string;
+  root: string;
+  scan_type: string;
+  frameworks: Record<string, string>;
+  files_scanned: number;
+  counts: { by_vuln?: Record<string, number>; by_severity?: Record<string, number> };
+  status: string;
+  duration_ms?: number | null;
+  findings_count: number;
+}
+
+// Full scan returned by GET /api/scans/{id} (extends ScanResult with metadata).
+export interface StoredScan extends ScanResult {
+  id: number;
+  created_at: string;
+  scan_type: string;
+  status: string;
+  duration_ms?: number | null;
+  error?: string | null;
+}
+
+// Row returned by GET /api/activity.
+export interface ActivityEntry {
+  id: number;
+  created_at: string;
+  scan_id: number | null;
+  entity_type: string;
+  entity_id: number | null;
+  action: string;
+  actor: string;
+  details: Record<string, unknown>;
+}
+
 export const SAMPLES: { value: string; label: string }[] = [
   { value: "php_native", label: "PHP · native" },
   { value: "php_yii", label: "PHP · Yii" },

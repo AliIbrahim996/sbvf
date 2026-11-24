@@ -17,6 +17,9 @@ services:
       - "8080:8080"
     environment:
       SBVF_UI_HOST: "0.0.0.0"
+      # Persistence: point the backend at the postgres service. Remove this line
+      # (or the db service) to run without persistence — scans still work.
+      DATABASE_URL: "postgresql://sbvf:sbvf@db:5432/sbvf"
     # Mount the source over the image copy so code changes are picked up on a
     # container restart, without rebuilding the image. Remove these lines to run
     # the self-contained image as built.
@@ -24,6 +27,24 @@ services:
       - ./sbvf:/app/sbvf:ro
       - ./ui:/app/ui:ro
       - ./testbed:/app/testbed:ro
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: unless-stopped
+
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: sbvf
+      POSTGRES_PASSWORD: sbvf
+      POSTGRES_DB: sbvf
+    volumes:
+      - sbvf-db:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U sbvf -d sbvf"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
     restart: unless-stopped
 
   frontend:
@@ -53,3 +74,6 @@ services:
       # Host 3002 — 3000 is taken by the SBVF frontend.
       - "3002:3000"
     restart: unless-stopped
+
+volumes:
+  sbvf-db:

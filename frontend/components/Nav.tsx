@@ -38,6 +38,7 @@ export function Nav({ right }: { right?: ReactNode }) {
         </span>
       </Link>
       <span className="nav-right">
+        <Link href="/history" className="nav-link">History</Link>
         {right}
         <button className="theme-btn" onClick={toggleTheme} aria-label="Toggle colour theme" title="Toggle theme">
           {theme !== "light" ? (

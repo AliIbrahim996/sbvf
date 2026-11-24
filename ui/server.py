@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import os
 import sys
+import time
 import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -23,6 +24,7 @@ from sbvf.sast import scan_path              # noqa: E402
 from sbvf.sast.repo import (                 # noqa: E402
     ALLOWED_HOSTS, RepoURLError, clone_repo, is_repo_url, normalize_repo_url,
     remove_tree)
+from sbvf import store                        # noqa: E402  (optional persistence)
 from testbed.launcher import start_all       # noqa: E402
 
 # Bundled intentionally-vulnerable sample projects for the static analyzer.
@@ -76,6 +78,22 @@ class UIHandler(BaseHTTPRequestHandler):
         if parsed.path == "/api/scan":
             return self._scan_stream(urllib.parse.parse_qs(parsed.query))
 
+        if parsed.path == "/api/scans":
+            return self._list_scans(urllib.parse.parse_qs(parsed.query))
+
+        if parsed.path.startswith("/api/scans/"):
+            return self._get_scan(parsed.path.rstrip("/").rsplit("/", 1)[-1])
+
+        if parsed.path == "/api/activity":
+            return self._list_activity(urllib.parse.parse_qs(parsed.query))
+
+        self.send_response(404)
+        self.end_headers()
+
+    def do_DELETE(self):
+        parsed = urllib.parse.urlparse(self.path)
+        if parsed.path.startswith("/api/scans/"):
+            return self._delete_scan(parsed.path.rstrip("/").rsplit("/", 1)[-1])
         self.send_response(404)
         self.end_headers()
 
@@ -83,6 +101,58 @@ class UIHandler(BaseHTTPRequestHandler):
         payload = f"event: {event}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
         self.wfile.write(payload.encode("utf-8"))
         self.wfile.flush()
+
+    def _json(self, obj, code=200):
+        body = json.dumps(obj, ensure_ascii=False).encode("utf-8")
+        self.send_response(code)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    # ---- persistence-backed endpoints (no-op friendly when the DB is off) ----
+    def _persistence_off(self):
+        self._json({"enabled": False,
+                    "message": "History requires the database service (set DATABASE_URL)."},
+                   code=503)
+
+    def _list_scans(self, qs):
+        if not store.is_enabled():
+            return self._persistence_off()
+        limit = min(int(qs.get("limit", ["50"])[0] or 50), 200)
+        offset = int(qs.get("offset", ["0"])[0] or 0)
+        self._json({"enabled": True, "scans": store.repository.list_scans(limit, offset)})
+
+    def _get_scan(self, raw_id):
+        if not store.is_enabled():
+            return self._persistence_off()
+        try:
+            scan_id = int(raw_id)
+        except ValueError:
+            return self._json({"message": "bad scan id"}, code=400)
+        scan = store.repository.get_scan(scan_id)
+        if scan is None:
+            return self._json({"message": "scan not found"}, code=404)
+        self._json(scan)
+
+    def _delete_scan(self, raw_id):
+        if not store.is_enabled():
+            return self._persistence_off()
+        try:
+            scan_id = int(raw_id)
+        except ValueError:
+            return self._json({"message": "bad scan id"}, code=400)
+        ok = store.repository.delete_scan(scan_id)
+        self._json({"deleted": ok}, code=200 if ok else 404)
+
+    def _list_activity(self, qs):
+        if not store.is_enabled():
+            return self._persistence_off()
+        limit = min(int(qs.get("limit", ["100"])[0] or 100), 500)
+        sid = qs.get("scan_id", [None])[0]
+        scan_id = int(sid) if sid not in (None, "") else None
+        self._json({"enabled": True,
+                    "activity": store.repository.list_activity(limit, scan_id)})
 
     def _scan_stream(self, qs):
         """Server-Sent Events stream for a static (SAST) source-code scan.
@@ -140,9 +210,22 @@ class UIHandler(BaseHTTPRequestHandler):
                 target = os.path.join(SAST_DIR, sample if sample in SAST_SAMPLES
                                       else "php_native")
 
+            started = time.monotonic()
             result = scan_path(target, on_step=on_step)
             if clone_dir:
                 result["root"] = url
+            # Persist the scan (best-effort; a DB failure must not break the stream).
+            try:
+                scan_type = ("repo" if (custom and is_repo_url(custom))
+                             else "local" if custom else "sample")
+                scan_id = store.repository.save_scan(
+                    result, target=(custom or sample),
+                    scan_type=scan_type,
+                    duration_ms=int((time.monotonic() - started) * 1000))
+                if scan_id is not None:
+                    result["scan_id"] = scan_id
+            except Exception:
+                pass
             self._sse("scan_done", result)
         except (BrokenPipeError, ConnectionResetError):
             pass
@@ -198,6 +281,10 @@ class UIHandler(BaseHTTPRequestHandler):
 
 def main():
     global BASE_URLS
+    if store.is_enabled():
+        store.migrate.init()          # best-effort; prints status, never raises
+    else:
+        print("[sbvf.store] persistence disabled (no DATABASE_URL)")
     _servers, BASE_URLS = start_all()
     srv = ThreadingHTTPServer((UI_HOST, UI_PORT), UIHandler)
     print(f"SBVF UI on http://{UI_HOST}:{UI_PORT}")

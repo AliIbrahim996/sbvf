@@ -11,6 +11,12 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
+
+# Optional persistence deps (psycopg). The core is stdlib-only, so this layer is
+# small and cached; the app still runs if the DB is not configured.
+COPY requirements.txt ./
+RUN pip install --no-cache-dir -r requirements.txt
+
 COPY sbvf/ ./sbvf/
 COPY testbed/ ./testbed/
 COPY ui/ ./ui/
