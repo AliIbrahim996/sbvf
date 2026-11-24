@@ -396,6 +396,29 @@ def get_ai(scan_id: int) -> Dict:
 
 # ------------------------------- Q&A layer -------------------------------
 
+_SEARCH_COLS = ["title", "message", "file", "vuln", "cwe"]
+
+
+def _search_terms(query: str) -> List[str]:
+    """Significant lowercase search terms from a free-text query (max 8)."""
+    return [w.lower() for w in _SEARCH_WORD.findall(query or "") if len(w) > 2][:8]
+
+
+def _search_where(terms: List[str], cols: List[str]):
+    """Build a parameterized ``WHERE`` fragment matching any term in any column.
+
+    Pure (no DB) so it can be unit-tested. Returns ``(sql_fragment, params)``;
+    an empty term list yields no fragment (caller returns recent rows).
+    """
+    if not terms:
+        return "", []
+    ors, params = [], []
+    for t in terms:
+        ors.append("(" + " OR ".join(f"{c} ILIKE %s" for c in cols) + ")")
+        params += [f"%{t}%"] * len(cols)
+    return " WHERE " + " OR ".join(ors), params
+
+
 def search_findings(query: str, limit: int = 20) -> List[Dict]:
     """Findings whose text matches any query term (ILIKE), newest first.
 
@@ -404,21 +427,12 @@ def search_findings(query: str, limit: int = 20) -> List[Dict]:
     pool = db.get_pool()
     if pool is None:
         return []
-    terms = [w.lower() for w in _SEARCH_WORD.findall(query or "") if len(w) > 2][:8]
-    cols = ["title", "message", "file", "vuln", "cwe"]
+    where, params = _search_where(_search_terms(query), _SEARCH_COLS)
     try:
         with pool.connection() as conn, conn.cursor() as cur:
             sql = ("SELECT scan_id, title, cwe, severity, file, line, vuln, message "
-                   "FROM findings")
-            params: List[Any] = []
-            if terms:
-                ors = []
-                for t in terms:
-                    ors.append("(" + " OR ".join(f"{c} ILIKE %s" for c in cols) + ")")
-                    params += [f"%{t}%"] * len(cols)
-                sql += " WHERE " + " OR ".join(ors)
-            sql += " ORDER BY id DESC LIMIT %s"
-            params.append(limit)
+                   "FROM findings" + where + " ORDER BY id DESC LIMIT %s")
+            params = list(params) + [limit]
             cur.execute(sql, params)
             names = ["scan_id", "title", "cwe", "severity", "file", "line", "vuln", "message"]
             out = []
@@ -460,6 +474,38 @@ def save_chat_message(role: str, content: str, *, scan_id: Optional[int] = None,
     except Exception as exc:
         print(f"[sbvf.store] save_chat_message failed: {exc}")
         return None
+
+
+def save_chat_exchange(question: str, answer: str, *, scan_id: Optional[int] = None,
+                       provider: str = "", model: str = "",
+                       sources: Optional[List] = None) -> bool:
+    """Persist a user question and its assistant answer in ONE transaction, with
+    the qa.answered audit row. Keeps the thread consistent (no dangling turn)."""
+    pool = db.get_pool()
+    if pool is None:
+        return False
+    try:
+        with pool.connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """INSERT INTO chat_messages (scan_id, role, content, provider, model)
+                       VALUES (%s,'user',%s,%s,%s)""",
+                    (scan_id, question, provider, model))
+                cur.execute(
+                    """INSERT INTO chat_messages (scan_id, role, content, provider, model, details)
+                       VALUES (%s,'assistant',%s,%s,%s,%s) RETURNING id""",
+                    (scan_id, answer, provider, model, _jsonb({"sources": sources or []})))
+                msg_id = cur.fetchone()[0]
+                cur.execute(
+                    """INSERT INTO activity_log (scan_id, entity_type, entity_id, action, actor, details)
+                       VALUES (%s,'chat',%s,'qa.answered',%s,%s)""",
+                    (scan_id, msg_id, f"agent:qa:{provider}" if provider else "agent:qa",
+                     _jsonb({"model": model})))
+            conn.commit()
+        return True
+    except Exception as exc:
+        print(f"[sbvf.store] save_chat_exchange failed: {exc}")
+        return False
 
 
 def list_chat(limit: int = 50, scan_id: Optional[int] = None) -> List[Dict]:

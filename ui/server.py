@@ -270,6 +270,8 @@ class UIHandler(BaseHTTPRequestHandler):
             scan_id = int(sid) if sid not in (None, "") else None
         except (TypeError, ValueError):
             scan_id = None
+        if scan_id is not None and scan_id < 1:
+            scan_id = None   # 0/negative is not a real scan id -> global thread
         result = agents.runner.answer_question(
             question, scan_id=scan_id, provider_name=(body.get("provider") or None))
         if not result.get("ok"):
@@ -285,6 +287,8 @@ class UIHandler(BaseHTTPRequestHandler):
             scan_id = int(sid) if sid not in (None, "") else None
         except (TypeError, ValueError):
             scan_id = None
+        if scan_id is not None and scan_id < 1:
+            scan_id = None   # 0/negative is not a real scan id -> global thread
         self._json({"enabled": True, "messages": store.repository.list_chat(limit, scan_id)})
 
     def _scan_stream(self, qs):

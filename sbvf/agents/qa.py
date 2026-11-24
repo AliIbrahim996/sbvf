@@ -7,7 +7,6 @@ retrieved context so the model does not invent scans or findings.
 from __future__ import annotations
 
 from .base import Agent
-from .provider import LLMProvider
 
 _SYSTEM = (
     "You are a security assistant answering questions about a user's static-analysis "
@@ -34,7 +33,3 @@ class QAAgent(Agent):
         return self.provider.complete(self.system_prompt,
                                        self.build_user({"question": question, "context": context}),
                                        max_tokens=max_tokens)
-
-
-def new_agent(provider: LLMProvider) -> QAAgent:
-    return QAAgent(provider)

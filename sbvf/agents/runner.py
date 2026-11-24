@@ -168,10 +168,8 @@ def answer_question(question: str, *, scan_id: Optional[int] = None,
     except (ProviderError, AgentError) as exc:
         return {"ok": False, "error": str(exc)}
 
-    repository.save_chat_message("user", question, scan_id=scan_id,
-                                 provider=provider.name, model=provider.model)
-    repository.save_chat_message("assistant", answer, scan_id=scan_id,
-                                 provider=provider.name, model=provider.model,
-                                 details={"sources": ctx["sources"]})
+    repository.save_chat_exchange(question, answer, scan_id=scan_id,
+                                  provider=provider.name, model=provider.model,
+                                  sources=ctx["sources"])
     return {"ok": True, "answer": answer, "sources": ctx["sources"],
             "provider": provider.name, "model": provider.model}

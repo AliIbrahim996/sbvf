@@ -140,6 +140,23 @@ class TestQaRetrieval(unittest.TestCase):
         self.assertIn("SQL injection", answer)
 
 
+class TestSearchClause(unittest.TestCase):
+    def test_terms_and_where_are_parameterized(self):
+        from sbvf.store import repository
+        cols = ["title", "message", "file", "vuln", "cwe"]
+        terms = repository._search_terms("which scans had SQL injection?")
+        self.assertEqual(terms, ["which", "scans", "had", "sql", "injection"])
+        where, params = repository._search_where(["sql", "injection"], cols)
+        self.assertTrue(where.startswith(" WHERE "))
+        self.assertEqual(where.count("ILIKE %s"), 2 * len(cols))  # 2 terms x 5 cols
+        self.assertEqual(len(params), 2 * len(cols))
+        self.assertTrue(all(p == "%sql%" or p == "%injection%" for p in params))
+
+    def test_empty_query_yields_no_clause(self):
+        from sbvf.store import repository
+        self.assertEqual(repository._search_where([], ["title"]), ("", []))
+
+
 @unittest.skipUnless(os.environ.get("DATABASE_URL"), "DATABASE_URL not set")
 class TestRunnerPersistence(unittest.TestCase):
     def setUp(self):
