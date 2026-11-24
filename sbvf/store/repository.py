@@ -6,9 +6,12 @@ checking the return value.
 """
 from __future__ import annotations
 
+import re
 from typing import Any, Dict, List, Optional
 
 from . import db
+
+_SEARCH_WORD = re.compile(r"[A-Za-z0-9]+")
 
 
 def _jsonb(value: Any):
@@ -389,3 +392,102 @@ def get_ai(scan_id: int) -> Dict:
     """Combined AI output for a scan: assessments + prioritization."""
     return {"assessments": get_assessments(scan_id),
             "prioritization": get_prioritization(scan_id)}
+
+
+# ------------------------------- Q&A layer -------------------------------
+
+def search_findings(query: str, limit: int = 20) -> List[Dict]:
+    """Findings whose text matches any query term (ILIKE), newest first.
+
+    With no usable terms, returns the most recent findings as general context.
+    """
+    pool = db.get_pool()
+    if pool is None:
+        return []
+    terms = [w.lower() for w in _SEARCH_WORD.findall(query or "") if len(w) > 2][:8]
+    cols = ["title", "message", "file", "vuln", "cwe"]
+    try:
+        with pool.connection() as conn, conn.cursor() as cur:
+            sql = ("SELECT scan_id, title, cwe, severity, file, line, vuln, message "
+                   "FROM findings")
+            params: List[Any] = []
+            if terms:
+                ors = []
+                for t in terms:
+                    ors.append("(" + " OR ".join(f"{c} ILIKE %s" for c in cols) + ")")
+                    params += [f"%{t}%"] * len(cols)
+                sql += " WHERE " + " OR ".join(ors)
+            sql += " ORDER BY id DESC LIMIT %s"
+            params.append(limit)
+            cur.execute(sql, params)
+            names = ["scan_id", "title", "cwe", "severity", "file", "line", "vuln", "message"]
+            out = []
+            for r in cur.fetchall():
+                d = dict(zip(names, r))
+                d["location"] = f"{d['file']}:{d['line']}" if d.get("file") else ""
+                out.append(d)
+            return out
+    except Exception as exc:
+        print(f"[sbvf.store] search_findings failed: {exc}")
+        return []
+
+
+def save_chat_message(role: str, content: str, *, scan_id: Optional[int] = None,
+                      provider: str = "", model: str = "",
+                      details: Optional[Dict] = None) -> Optional[int]:
+    """Persist one chat turn; the assistant turn also logs a qa.answered audit row."""
+    pool = db.get_pool()
+    if pool is None:
+        return None
+    try:
+        with pool.connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """INSERT INTO chat_messages (scan_id, role, content, provider, model, details)
+                       VALUES (%s,%s,%s,%s,%s,%s) RETURNING id""",
+                    (scan_id, role, content, provider, model, _jsonb(details or {})),
+                )
+                msg_id = cur.fetchone()[0]
+                if role == "assistant":
+                    cur.execute(
+                        """INSERT INTO activity_log (scan_id, entity_type, entity_id, action, actor, details)
+                           VALUES (%s,'chat',%s,'qa.answered',%s,%s)""",
+                        (scan_id, msg_id, f"agent:qa:{provider}" if provider else "agent:qa",
+                         _jsonb({"model": model})),
+                    )
+            conn.commit()
+        return msg_id
+    except Exception as exc:
+        print(f"[sbvf.store] save_chat_message failed: {exc}")
+        return None
+
+
+def list_chat(limit: int = 50, scan_id: Optional[int] = None) -> List[Dict]:
+    """Chat turns in chronological order. scan_id=None returns the global thread
+    (messages not tied to a specific scan)."""
+    pool = db.get_pool()
+    if pool is None:
+        return []
+    try:
+        with pool.connection() as conn, conn.cursor() as cur:
+            if scan_id is None:
+                cur.execute(
+                    """SELECT id, created_at, scan_id, role, content, provider, model, details
+                       FROM chat_messages WHERE scan_id IS NULL
+                       ORDER BY id DESC LIMIT %s""", (limit,))
+            else:
+                cur.execute(
+                    """SELECT id, created_at, scan_id, role, content, provider, model, details
+                       FROM chat_messages WHERE scan_id = %s
+                       ORDER BY id DESC LIMIT %s""", (scan_id, limit))
+            names = ["id", "created_at", "scan_id", "role", "content", "provider", "model", "details"]
+            out = []
+            for r in cur.fetchall():
+                d = dict(zip(names, r))
+                d["created_at"] = d["created_at"].isoformat()
+                out.append(d)
+            out.reverse()  # chronological (oldest first) for display
+            return out
+    except Exception as exc:
+        print(f"[sbvf.store] list_chat failed: {exc}")
+        return []

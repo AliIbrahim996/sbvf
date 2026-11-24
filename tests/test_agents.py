@@ -10,9 +10,11 @@ import os
 import unittest
 
 from sbvf.agents import provider as prov
+from sbvf.agents import retrieval
 from sbvf.agents.base import AgentError, run_json
 from sbvf.agents.finders import PrioritizationAgent, TriageAgent
 from sbvf.agents.provider import LLMProvider
+from sbvf.agents.qa import QAAgent
 
 
 class FakeProvider(LLMProvider):
@@ -118,6 +120,26 @@ class TestAgentNormalize(unittest.TestCase):
         self.assertEqual(top["risk_score"], 100.0)    # clamped to [0,100]
 
 
+class TestQaRetrieval(unittest.TestCase):
+    def test_rank_findings_orders_by_overlap(self):
+        findings = [
+            {"title": "XSS", "vuln": "xss", "message": "", "cwe": "CWE-79"},
+            {"title": "SQL Injection", "vuln": "sqli", "message": "sql", "cwe": "CWE-89"},
+            {"title": "Open Redirect", "vuln": "open_redirect", "message": "", "cwe": "CWE-601"},
+        ]
+        ranked = retrieval.rank_findings(findings, "which scans had sql injection?")
+        self.assertEqual(ranked[0]["vuln"], "sqli")
+
+    def test_query_terms_drops_stopwords(self):
+        self.assertEqual(retrieval.query_terms("what are my scans with SQL injection"),
+                         ["sql", "injection"])
+
+    def test_qa_agent_returns_prose_unchanged(self):
+        p = FakeProvider(scripted=["Scan #1 found SQL injection at shop/item.php:12."])
+        answer = QAAgent(p).ask("where is the sqli?", "context here")
+        self.assertIn("SQL injection", answer)
+
+
 @unittest.skipUnless(os.environ.get("DATABASE_URL"), "DATABASE_URL not set")
 class TestRunnerPersistence(unittest.TestCase):
     def setUp(self):
@@ -146,6 +168,27 @@ class TestRunnerPersistence(unittest.TestCase):
         self.assertIn(ai["assessments"][0]["is_false_positive"], (False,))
         self.assertIsNotNone(ai["prioritization"])
         self.assertTrue(ai["prioritization"]["summary"])
+        repository.delete_scan(scan_id)
+
+    def test_answer_question_persists_chat(self):
+        from sbvf.agents import runner
+        from sbvf.store import repository
+        result = {"root": "testbed", "frameworks": {"php": "php-native"},
+                  "files_scanned": 1, "counts": {}, "findings": [_FINDING]}
+        scan_id = repository.save_scan(result, target="t", scan_type="sample")
+
+        orig = runner.get_provider
+        runner.get_provider = lambda name=None: FakeProvider(scripted=["It had SQL injection."])
+        try:
+            out = runner.answer_question("which scans had sql injection?")
+        finally:
+            runner.get_provider = orig
+
+        self.assertTrue(out["ok"])
+        self.assertIn("SQL injection", out["answer"])
+        chat = repository.list_chat(scan_id=None)
+        roles = [m["role"] for m in chat[-2:]]
+        self.assertEqual(roles, ["user", "assistant"])
         repository.delete_scan(scan_id)
 
 

@@ -141,3 +141,37 @@ def run_finding_agents(scan_id: int, *, agents: Optional[List[str]] = None,
     emit("agents_done", {"provider": provider.name, "model": provider.model,
                          "assessed": len(results_by_idx), "aborted": stop.is_set()})
     return out
+
+
+def answer_question(question: str, *, scan_id: Optional[int] = None,
+                    provider_name: Optional[str] = None) -> Dict[str, Any]:
+    """Answer a natural-language question grounded in the stored scan history.
+
+    Persists the user and assistant turns (best-effort) and returns the answer
+    plus the sources used. Degrades gracefully when no provider is configured.
+    """
+    from . import retrieval  # local import keeps module load cheap
+    from .provider import ProviderError
+    from .qa import QAAgent
+
+    question = (question or "").strip()
+    if not question:
+        return {"ok": False, "error": "empty question"}
+
+    provider = get_provider(provider_name)
+    if provider is None:
+        return {"ok": False, "error": "no AI provider configured"}
+
+    ctx = retrieval.build_context(question, scan_id=scan_id)
+    try:
+        answer = QAAgent(provider).ask(question, ctx["text"]).strip()
+    except (ProviderError, AgentError) as exc:
+        return {"ok": False, "error": str(exc)}
+
+    repository.save_chat_message("user", question, scan_id=scan_id,
+                                 provider=provider.name, model=provider.model)
+    repository.save_chat_message("assistant", answer, scan_id=scan_id,
+                                 provider=provider.name, model=provider.model,
+                                 details={"sources": ctx["sources"]})
+    return {"ok": True, "answer": answer, "sources": ctx["sources"],
+            "provider": provider.name, "model": provider.model}
