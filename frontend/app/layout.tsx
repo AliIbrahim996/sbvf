@@ -25,7 +25,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
         {/* Apply the saved theme before paint to avoid a flash of the wrong palette. */}
         <script
           dangerouslySetInnerHTML={{
-            __html: `(function(){try{var t=localStorage.getItem('sbvf-theme')||'dark';document.documentElement.setAttribute('data-theme',t);}catch(e){document.documentElement.setAttribute('data-theme','dark');}})();`,
+            __html: `(function(){var d=document.documentElement;try{d.setAttribute('data-theme',localStorage.getItem('sbvf-theme')||'dark');}catch(e){d.setAttribute('data-theme','dark');}d.classList.add('js-reveal');})();`,
           }}
         />
       </head>

@@ -403,9 +403,11 @@ footer { margin-top: 30px; color: var(--faint); font-size: 12px; text-align: cen
 }
 .anim-up { opacity: 0; animation: anim-up .6s cubic-bezier(.22,.61,.36,1) forwards; }
 
-/* scroll-reveal wrapper (JS toggles .in) */
-.reveal { opacity: 0; transform: translateY(22px); transition: opacity .6s ease, transform .6s cubic-bezier(.22,.61,.36,1); }
-.reveal.in { opacity: 1; transform: none; }
+/* scroll-reveal wrapper (JS toggles .in). The hidden initial state only applies
+   when JS is present (html.js-reveal, set pre-paint), so without JS the content
+   stays fully visible rather than stuck at opacity:0. */
+.js-reveal .reveal { opacity: 0; transform: translateY(22px); transition: opacity .6s ease, transform .6s cubic-bezier(.22,.61,.36,1); }
+.js-reveal .reveal.in { opacity: 1; transform: none; }
 
 /* staggered children inside a revealed section */
 .reveal.in .cov,

@@ -193,8 +193,12 @@ export function exportPdf(scan: ScanResult) {
     win.document.open();
     win.document.write(html);
     win.document.close();
-    // Give the web fonts a moment to load before printing.
-    setTimeout(() => {
+    // Print once the web fonts are ready so the report never renders in the
+    // fallback face; a timeout guards against fonts.ready never settling.
+    let printed = false;
+    const doPrint = () => {
+      if (printed) return;
+      printed = true;
       try {
         win.focus();
         win.print();
@@ -203,7 +207,13 @@ export function exportPdf(scan: ScanResult) {
         frame.remove();
         download();
       }
-    }, 450);
+    };
+    try {
+      win.document.fonts.ready.then(() => setTimeout(doPrint, 60));
+    } catch {
+      /* fonts API unavailable — rely on the fallback timer below */
+    }
+    setTimeout(doPrint, 1400); // fallback cap
   } catch {
     download();
   }
