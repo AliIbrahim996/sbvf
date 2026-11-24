@@ -1,0 +1,12 @@
+{
+  "name": "sast-sample-supplychain",
+  "private": true,
+  "description": "Intentionally risky dependency manifest (academic SAST target, OWASP A03).",
+  "dependencies": {
+    "express": "4.19.2",
+    "lodash": "*",
+    "left-pad": "latest",
+    "legacy-widget": "1.x",
+    "internal-tool": "http://packages.internal/internal-tool.tgz"
+  }
+}

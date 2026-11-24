@@ -1511,5 +1511,102 @@ class TestMishandledExceptions(unittest.TestCase):
                 [f for f in r["findings"] if f["vuln"] in a10], name)
 
 
+class TestSupplyChain(unittest.TestCase):
+    """OWASP A03: dependency-manifest checks flag unpinned versions (CWE-1104)
+    and insecure sources (CWE-829), not pinned/caret specs over HTTPS."""
+
+    def setUp(self):
+        self.r = scan_path(os.path.join(SAMPLES, "supplychain"))
+
+    def _pkg_line(self, needle):
+        src = open(os.path.join(SAMPLES, "supplychain", "package.json")).read().splitlines()
+        return next(i for i, l in enumerate(src, 1) if needle in l)
+
+    def test_classes_fire_on_vulnerable_manifests(self):
+        got = _vulns(self.r)
+        self.assertIn(("unpinned_dependency", self._pkg_line('"lodash"')), got)
+        self.assertIn(("unpinned_dependency", self._pkg_line('"legacy-widget"')), got)
+        self.assertIn(("insecure_dependency_source", self._pkg_line('"internal-tool"')), got)
+
+    def test_counts(self):
+        vs = [v for v, _ in _vulns(self.r)]
+        self.assertEqual(vs.count("unpinned_dependency"), 5)       # 3 npm + 2 pip
+        self.assertEqual(vs.count("insecure_dependency_source"), 2)  # 1 npm + 1 pip
+        self.assertEqual(len(self.r["findings"]), 7)
+
+    def test_metadata(self):
+        f = {x["vuln"]: x for x in self.r["findings"]}
+        self.assertEqual((f["unpinned_dependency"]["cwe"], f["unpinned_dependency"]["severity"]),
+                         ("CWE-1104", "low"))
+        self.assertEqual((f["insecure_dependency_source"]["cwe"],
+                          f["insecure_dependency_source"]["severity"]), ("CWE-829", "high"))
+        for x in f.values():
+            self.assertTrue(x["fix"] and x["impact"] and x["owner"] and x["exposure"] and x["how_in"])
+
+    def test_streams_finding_steps(self):
+        steps = []
+        scan_path(os.path.join(SAMPLES, "supplychain"), on_step=steps.append)
+        self.assertEqual(sum(1 for s in steps if s.kind == "finding"), 7)
+
+    def _scan(self, name, content):
+        with tempfile.TemporaryDirectory() as d:
+            with open(os.path.join(d, name), "w") as fh:
+                fh.write(content)
+            return {f["vuln"] for f in scan_path(d)["findings"]}
+
+    def test_npm_variants(self):
+        self.assertIn("unpinned_dependency", self._scan("package.json", '{"dependencies":{"a":"*"}}'))
+        self.assertIn("unpinned_dependency", self._scan("package.json", '{"dependencies":{"a":"latest"}}'))
+        self.assertIn("unpinned_dependency", self._scan("package.json", '{"dependencies":{"a":"1.x"}}'))
+        self.assertIn("unpinned_dependency", self._scan("package.json", '{"dependencies":{"a":">=1.0.0"}}'))
+        self.assertIn("insecure_dependency_source", self._scan("package.json", '{"dependencies":{"a":"http://h/a.tgz"}}'))
+        self.assertIn("insecure_dependency_source", self._scan("package.json", '{"dependencies":{"a":"git://h/a.git"}}'))
+        # caret / tilde / exact / https are pinned-or-trusted — not flagged
+        for safe in ('{"dependencies":{"a":"^4.17.21"}}',
+                     '{"dependencies":{"a":"~1.2.3"}}',
+                     '{"dependencies":{"a":"4.19.2"}}',
+                     '{"dependencies":{"a":"git+https://github.com/me/r.git#v1"}}'):
+            self.assertEqual(self._scan("package.json", safe), set(), safe)
+
+    def test_composer_skips_platform_reqs(self):
+        # php / ext-* are platform requirements, not packages
+        got = self._scan("composer.json",
+                         '{"require":{"php":"*","ext-json":"*","vendor/pkg":"1.2.3","bad/pkg":"*"}}')
+        self.assertEqual(got, {"unpinned_dependency"})     # only bad/pkg, not php/ext-json
+
+    def test_pip_variants(self):
+        self.assertIn("unpinned_dependency", self._scan("requirements.txt", "requests>=2.0\n"))
+        self.assertIn("unpinned_dependency", self._scan("requirements.txt", "pyyaml\n"))
+        self.assertIn("insecure_dependency_source", self._scan("requirements.txt", "-e git+http://h/p.git#egg=p\n"))
+        self.assertIn("insecure_dependency_source", self._scan("requirements.txt", "--index-url http://pypi.local/simple\n"))
+        # == / ~= pins, https url, and comments are not flagged
+        for safe in ("flask==2.3.3\n", "django~=4.2\n",
+                     "requests @ https://example.com/r-2.0.tar.gz\n",
+                     "--index-url https://pypi.local/simple\n", "# just a comment\n",
+                     # a URL in a TRAILING comment is not the dependency source (review regression)
+                     "requests==2.0  # see http://docs.example.com\n"):
+            self.assertEqual(self._scan("requirements.txt", safe), set(), safe)
+        # the comment must not hide a genuinely unpinned requirement either
+        self.assertIn("unpinned_dependency", self._scan("requirements.txt", "pyyaml  # TODO pin\n"))
+
+    def test_duplicate_dep_name_distinct_lines(self):
+        # a dep named in two maps maps to two distinct lines (review regression)
+        from sbvf.sast.supply_chain import _scan_json_manifest
+        raw = ('{\n  "dependencies": { "lodash": "*" },\n'
+               '  "devDependencies": { "lodash": "*" }\n}')
+        lines = sorted(f.line for f in _scan_json_manifest("package.json", raw))
+        self.assertEqual(len(lines), 2)
+        self.assertNotEqual(lines[0], lines[1])
+
+    def test_existing_samples_have_no_a03_findings(self):
+        a03 = {"unpinned_dependency", "insecure_dependency_source"}
+        for name in os.listdir(SAMPLES):
+            if name == "supplychain":
+                continue
+            r = scan_path(os.path.join(SAMPLES, name))
+            self.assertFalse(
+                [f for f in r["findings"] if f["vuln"] in a03], name)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

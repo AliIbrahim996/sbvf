@@ -1,0 +1,6 @@
+# Intentionally risky Python requirements (academic SAST target, OWASP A03).
+flask==2.3.3
+django~=4.2
+requests>=2.0
+pyyaml
+-e git+http://example.com/pkg.git#egg=pkg
