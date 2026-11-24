@@ -198,6 +198,8 @@ class UIHandler(BaseHTTPRequestHandler):
             scan_id = int(raw_id)
         except ValueError:
             return self._json({"message": "bad scan id"}, code=400)
+        if store.repository.get_scan(scan_id) is None:
+            return self._json({"message": "scan not found"}, code=404)
         self._json(store.repository.get_ai(scan_id))
 
     def _run_agents(self, raw_id):

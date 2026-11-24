@@ -51,6 +51,7 @@ class LLMProvider(ABC):
 
     def __init__(self, model: Optional[str] = None):
         self.model = model or os.environ.get("SBVF_AI_MODEL") or _DEFAULT_MODELS.get(self.name, "")
+        self._client = None  # cached SDK client, created on first use
 
     @abstractmethod
     def complete(self, system: str, user: str, *, max_tokens: int = 1024) -> str:
@@ -60,16 +61,21 @@ class LLMProvider(ABC):
 class ClaudeProvider(LLMProvider):
     name = "claude"
 
+    def _client_or_raise(self):
+        if self._client is None:
+            try:
+                import anthropic  # lazy: optional dependency
+            except ImportError as exc:  # pragma: no cover - env-specific
+                raise ProviderError("the 'anthropic' package is not installed") from exc
+            key = os.environ.get("ANTHROPIC_API_KEY")
+            if not key:
+                raise ProviderError("ANTHROPIC_API_KEY is not set")
+            self._client = anthropic.Anthropic(api_key=key)
+        return self._client
+
     def complete(self, system: str, user: str, *, max_tokens: int = 1024) -> str:
+        client = self._client_or_raise()
         try:
-            import anthropic  # lazy: optional dependency
-        except ImportError as exc:  # pragma: no cover - env-specific
-            raise ProviderError("the 'anthropic' package is not installed") from exc
-        key = os.environ.get("ANTHROPIC_API_KEY")
-        if not key:
-            raise ProviderError("ANTHROPIC_API_KEY is not set")
-        try:
-            client = anthropic.Anthropic(api_key=key)
             msg = client.messages.create(
                 model=self.model, max_tokens=max_tokens, system=system,
                 messages=[{"role": "user", "content": user}],
@@ -85,21 +91,33 @@ class ClaudeProvider(LLMProvider):
 class OpenAIProvider(LLMProvider):
     name = "openai"
 
+    def _client_or_raise(self):
+        if self._client is None:
+            try:
+                import openai  # lazy: optional dependency
+            except ImportError as exc:  # pragma: no cover - env-specific
+                raise ProviderError("the 'openai' package is not installed") from exc
+            key = os.environ.get("OPENAI_API_KEY")
+            if not key:
+                raise ProviderError("OPENAI_API_KEY is not set")
+            self._client = openai.OpenAI(api_key=key)
+        return self._client
+
     def complete(self, system: str, user: str, *, max_tokens: int = 1024) -> str:
+        client = self._client_or_raise()
+        messages = [{"role": "system", "content": system},
+                    {"role": "user", "content": user}]
         try:
-            import openai  # lazy: optional dependency
-        except ImportError as exc:  # pragma: no cover - env-specific
-            raise ProviderError("the 'openai' package is not installed") from exc
-        key = os.environ.get("OPENAI_API_KEY")
-        if not key:
-            raise ProviderError("OPENAI_API_KEY is not set")
-        try:
-            client = openai.OpenAI(api_key=key)
-            resp = client.chat.completions.create(
-                model=self.model, max_tokens=max_tokens,
-                messages=[{"role": "system", "content": system},
-                          {"role": "user", "content": user}],
-            )
+            try:
+                resp = client.chat.completions.create(
+                    model=self.model, max_tokens=max_tokens, messages=messages)
+            except Exception as exc:
+                # Newer OpenAI models reject `max_tokens` and require
+                # `max_completion_tokens`; retry once with the new parameter.
+                if "max_completion_tokens" not in str(exc):
+                    raise
+                resp = client.chat.completions.create(
+                    model=self.model, max_completion_tokens=max_tokens, messages=messages)
             return (resp.choices[0].message.content or "").strip()
         except Exception as exc:
             raise ProviderError(f"OpenAI request failed: {exc}") from exc

@@ -62,7 +62,17 @@ def run_finding_agents(scan_id: int, *, agents: Optional[List[str]] = None,
         emit("agents_error", {"message": "no AI provider is configured"})
         return {"ok": False, "error": "no AI provider configured"}
 
-    selected = [a for a in (agents or ALL_AGENTS) if a in ALL_AGENTS] or list(ALL_AGENTS)
+    # None/absent → run everything; an explicit list runs exactly its valid names
+    # (an all-invalid list is an error, not a silent "run everything").
+    if agents is None:
+        selected = list(ALL_AGENTS)
+    else:
+        selected = [a for a in agents if a in ALL_AGENTS]
+    if not selected:
+        emit("agents_error", {"message": "no valid agents selected "
+                              f"(choose from {', '.join(ALL_AGENTS)})"})
+        return {"ok": False, "error": "no valid agents selected"}
+
     findings: List[Dict[str, Any]] = scan.get("findings", []) or []
     idmap = repository.finding_ids(scan_id)
 
@@ -100,7 +110,7 @@ def run_finding_agents(scan_id: int, *, agents: Optional[List[str]] = None,
         for name in [n for n in ("triage", "remediation") if n in selected]:
             repository.save_agent_run(
                 scan_id, name, provider.name, provider.model,
-                status="error" if aborted and errors >= len(findings) else "completed",
+                status="error" if aborted else "completed",
                 duration_ms=dur,
                 details={"findings": len(findings), "with_errors": errors, "aborted": aborted})
 
