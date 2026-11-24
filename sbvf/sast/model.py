@@ -243,6 +243,23 @@ VULN_INFO = {
             "Review the deployment against a security configuration checklist.",
         ],
     },
+    # --- OWASP A08: Software and Data Integrity Failures (sbvf/sast/rules.py) -
+    "insecure_deserialization": {
+        "cwe": "CWE-502", "severity": "high", "title": "Insecure Deserialization",
+        "desc": "Data is deserialized with a format that can reconstruct arbitrary objects "
+                "(pickle, marshal, PHP unserialize, node-serialize, unsafe YAML).",
+        "owner": "Backend / security engineering", "exposure": ["Systems", "Data", "Accounts"],
+        "impact": "If the serialized bytes are attacker-controlled, decoding them can "
+                  "instantiate arbitrary objects and trigger code execution (RCE) or object "
+                  "injection — a software & data integrity failure (OWASP A08) that can "
+                  "fully compromise the server.",
+        "fix": [
+            "Never deserialize untrusted data with code-bearing formats (pickle/marshal/unserialize).",
+            "Exchange data as JSON and validate it against a strict schema.",
+            "Load YAML with a safe loader (yaml.safe_load / Loader=SafeLoader); in PHP pass allowed_classes=>false.",
+            "If a rich format is unavoidable, sign the payload (HMAC) and verify before decoding.",
+        ],
+    },
 }
 
 # Severity ordering for sorting the report (most serious first).

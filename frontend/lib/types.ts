@@ -149,4 +149,5 @@ export const SAMPLES: { value: string; label: string }[] = [
   { value: "idor_django", label: "IDOR · Django (A01)" },
   { value: "crypto_py", label: "Crypto failures · Python (A04)" },
   { value: "misconfig_py", label: "Security misconfig · Python (A02)" },
+  { value: "deser_py", label: "Insecure deserialization · Python (A08)" },
 ];

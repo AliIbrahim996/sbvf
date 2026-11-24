@@ -88,7 +88,8 @@ class Scanner:
                 findings.append(f)
                 self._report(f)
 
-        self._step("file", "Applying pattern rules (A04 cryptographic failures) ...")
+        self._step("file", "Applying pattern rules (A02 misconfig, A04 crypto, "
+                           "A08 integrity failures) ...")
         for f in scan_rules(root, on_step=self.on_step, files=files,
                             frameworks=frameworks):
             findings.append(f)

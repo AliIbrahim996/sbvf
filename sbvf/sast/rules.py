@@ -283,6 +283,41 @@ RULES: List[Rule] = [
         },
         message="Insecure configuration (wildcard ALLOWED_HOSTS, verbose error "
                 "display, or server fingerprint exposure) that eases attacks."),
+
+    # ----------------------------------------------------------------------
+    # A08 - Software and Data Integrity Failures
+    # ----------------------------------------------------------------------
+    Rule(
+        id="A08-insecure-deserialization", vuln="insecure_deserialization",
+        patterns={
+            "py": [r"\b_?c?pickle\s*\.\s*loads?\s*\(",
+                   r"\bmarshal\s*\.\s*loads?\s*\(",
+                   r"\b(?:dill|jsonpickle)\s*\.\s*(?:loads?|decode)\s*\("],
+            "php": [r"(?<![\w>:$])unserialize\s*\("],
+            # node-serialize / funcster rebuild functions from the payload. The
+            # call site is usually `serialize.unserialize(...)`, so a leading dot
+            # is allowed; only an identifier char before it is rejected.
+            "js": [r"(?<![\w$])unserialize\s*\(",
+                   r"\bfuncster\s*\.\s*deepDeserialize\s*\("],
+        },
+        # PHP 7+ unserialize($d, ['allowed_classes' => false]) blocks object
+        # instantiation — that is the hardened form, not a finding.
+        exclude=r"allowed_classes['\"]?\s*(?:=>|:)\s*(?:false|\[)",
+        message="Untrusted data is deserialized with a code-bearing format "
+                "(pickle/marshal/unserialize/node-serialize); a crafted payload can "
+                "instantiate arbitrary objects and execute code while decoding."),
+    Rule(
+        id="A08-unsafe-yaml-load", vuln="insecure_deserialization",
+        patterns={
+            "py": [r"\byaml\s*\.\s*load\s*\("],
+            "php": [r"(?<![\w>:$])yaml_parse\s*\("],
+            "js": [],
+        },
+        # yaml.load(x, Loader=SafeLoader/BaseLoader) and yaml.safe_load are the safe
+        # forms (FullLoader is deliberately NOT excluded — it has had object-construction holes).
+        exclude=r"SafeLoader|BaseLoader|safe_load",
+        message="YAML is parsed with a full (unsafe) loader; the document can construct "
+                "arbitrary objects. Use yaml.safe_load / Loader=SafeLoader."),
 ]
 
 
