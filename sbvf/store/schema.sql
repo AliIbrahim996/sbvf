@@ -105,6 +105,19 @@ CREATE TABLE IF NOT EXISTS scan_prioritizations (
     ranking     jsonb NOT NULL DEFAULT '[]'::jsonb
 );
 
+-- Q&A over scan history: each user question and assistant answer. Scoped to a
+-- scan when the question was asked from a scan's page, else global (scan_id NULL).
+CREATE TABLE IF NOT EXISTS chat_messages (
+    id          BIGSERIAL PRIMARY KEY,
+    created_at  timestamptz NOT NULL DEFAULT now(),
+    scan_id     bigint REFERENCES scans(id) ON DELETE SET NULL,
+    role        text NOT NULL,               -- 'user' | 'assistant'
+    content     text NOT NULL,
+    provider    text,
+    model       text,
+    details     jsonb NOT NULL DEFAULT '{}'::jsonb
+);
+
 CREATE INDEX IF NOT EXISTS idx_findings_scan      ON findings(scan_id);
 CREATE INDEX IF NOT EXISTS idx_findings_severity  ON findings(severity);
 CREATE INDEX IF NOT EXISTS idx_scans_created      ON scans(created_at DESC);
@@ -113,3 +126,4 @@ CREATE INDEX IF NOT EXISTS idx_activity_scan      ON activity_log(scan_id);
 CREATE INDEX IF NOT EXISTS idx_agent_runs_scan    ON agent_runs(scan_id);
 CREATE INDEX IF NOT EXISTS idx_assessments_scan   ON finding_assessments(scan_id);
 CREATE INDEX IF NOT EXISTS idx_prioritizations_scan ON scan_prioritizations(scan_id);
+CREATE INDEX IF NOT EXISTS idx_chat_scan          ON chat_messages(scan_id, created_at);

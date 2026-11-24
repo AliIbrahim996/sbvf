@@ -97,6 +97,9 @@ class UIHandler(BaseHTTPRequestHandler):
         if parsed.path == "/api/activity":
             return self._list_activity(urllib.parse.parse_qs(parsed.query))
 
+        if parsed.path == "/api/chat":
+            return self._list_chat(urllib.parse.parse_qs(parsed.query))
+
         self.send_response(404)
         self.end_headers()
 
@@ -110,6 +113,8 @@ class UIHandler(BaseHTTPRequestHandler):
     def do_POST(self):
         parsed = urllib.parse.urlparse(self.path)
         path = parsed.path.rstrip("/")
+        if path == "/api/ask":
+            return self._ask()
         if path.startswith("/api/scans/") and path.endswith("/agents"):
             scan_id = path[len("/api/scans/"):-len("/agents")]
             return self._run_agents(scan_id)
@@ -244,6 +249,47 @@ class UIHandler(BaseHTTPRequestHandler):
                 self._sse("agents_error", {"message": str(exc)})
             except (BrokenPipeError, ConnectionResetError):
                 pass
+
+    def _ask(self):
+        """Answer a natural-language question over the stored scan history (JSON)."""
+        from sbvf import agents  # lazy: optional AI layer
+        body = self._read_json_body()
+        question = (body.get("question") or "").strip()
+        if not question:
+            return self._json({"message": "question is required"}, code=400)
+        if not store.is_enabled():
+            return self._json({"enabled": False, "message":
+                              "Q&A requires the database service (set DATABASE_URL)."},
+                              code=503)
+        if not agents.is_enabled():
+            return self._json({"enabled": False, "message":
+                              "No AI provider is configured. Set ANTHROPIC_API_KEY, "
+                              "OPENAI_API_KEY or OLLAMA_URL to enable Q&A."}, code=503)
+        try:
+            sid = body.get("scan_id")
+            scan_id = int(sid) if sid not in (None, "") else None
+        except (TypeError, ValueError):
+            scan_id = None
+        if scan_id is not None and scan_id < 1:
+            scan_id = None   # 0/negative is not a real scan id -> global thread
+        result = agents.runner.answer_question(
+            question, scan_id=scan_id, provider_name=(body.get("provider") or None))
+        if not result.get("ok"):
+            return self._json({"message": result.get("error", "Q&A failed")}, code=502)
+        self._json(result)
+
+    def _list_chat(self, qs):
+        if not store.is_enabled():
+            return self._persistence_off()
+        limit = min(int(qs.get("limit", ["50"])[0] or 50), 200)
+        sid = qs.get("scan_id", [None])[0]
+        try:
+            scan_id = int(sid) if sid not in (None, "") else None
+        except (TypeError, ValueError):
+            scan_id = None
+        if scan_id is not None and scan_id < 1:
+            scan_id = None   # 0/negative is not a real scan id -> global thread
+        self._json({"enabled": True, "messages": store.repository.list_chat(limit, scan_id)})
 
     def _scan_stream(self, qs):
         """Server-Sent Events stream for a static (SAST) source-code scan.

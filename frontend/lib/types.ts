@@ -110,6 +110,33 @@ export interface AiStatus {
   providers: string[];
 }
 
+export interface AskSource {
+  scan_id: number | null;
+  location: string;
+  severity?: string;
+  cwe?: string;
+}
+
+export interface AskResponse {
+  ok: boolean;
+  answer: string;
+  sources: AskSource[];
+  provider?: string;
+  model?: string;
+  message?: string;
+}
+
+export interface ChatMessage {
+  id: number;
+  created_at: string;
+  scan_id: number | null;
+  role: "user" | "assistant";
+  content: string;
+  provider?: string;
+  model?: string;
+  details?: { sources?: AskSource[] } & Record<string, unknown>;
+}
+
 export const SAMPLES: { value: string; label: string }[] = [
   { value: "php_native", label: "PHP · native" },
   { value: "php_yii", label: "PHP · Yii" },

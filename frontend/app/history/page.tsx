@@ -1,6 +1,7 @@
 "use client";
 import Link from "next/link";
 import { useEffect, useState } from "react";
+import { AskPanel } from "@/components/AskPanel";
 import { Nav } from "@/components/Nav";
 import { ActivityIcon } from "@/components/icons";
 import type { ActivityEntry, ScanSummary } from "@/lib/types";
@@ -111,6 +112,8 @@ export default function HistoryPage() {
               </table>
             </div>
           </div>
+
+          <AskPanel />
 
           {activity.length > 0 && (
             <div className="card">
