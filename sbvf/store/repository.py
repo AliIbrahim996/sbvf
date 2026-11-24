@@ -214,3 +214,178 @@ def _scan_row(r) -> Dict:
         "frameworks": r[4], "files_scanned": r[5], "counts": r[6], "status": r[7],
         "duration_ms": r[8], "findings_count": r[9],
     }
+
+
+# ----------------------------- AI-agents layer -----------------------------
+# All no-ops when persistence is off; written only by sbvf/agents/.
+
+def finding_ids(scan_id: int) -> Dict[int, int]:
+    """Map each finding's position (idx) to its database id, for FK linkage."""
+    pool = db.get_pool()
+    if pool is None:
+        return {}
+    try:
+        with pool.connection() as conn, conn.cursor() as cur:
+            cur.execute("SELECT idx, id FROM findings WHERE scan_id = %s", (scan_id,))
+            return {int(idx): int(fid) for idx, fid in cur.fetchall()}
+    except Exception as exc:
+        print(f"[sbvf.store] finding_ids failed: {exc}")
+        return {}
+
+
+def save_agent_run(scan_id: int, agent: str, provider: str, model: str, *,
+                   status: str = "completed", duration_ms: Optional[int] = None,
+                   error: Optional[str] = None, details: Optional[Dict] = None,
+                   ) -> Optional[int]:
+    """Record one agent invocation and log it to the audit trail."""
+    pool = db.get_pool()
+    if pool is None:
+        return None
+    try:
+        with pool.connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """INSERT INTO agent_runs
+                       (scan_id, agent, provider, model, status, duration_ms, error, details)
+                       VALUES (%s,%s,%s,%s,%s,%s,%s,%s) RETURNING id""",
+                    (scan_id, agent, provider, model, status, duration_ms, error,
+                     _jsonb(details or {})),
+                )
+                run_id = cur.fetchone()[0]
+                cur.execute(
+                    """INSERT INTO activity_log (scan_id, entity_type, entity_id, action, actor, details)
+                       VALUES (%s,'agent',%s,%s,%s,%s)""",
+                    (scan_id, run_id,
+                     "agent.run.finished" if status == "completed" else "agent.run.failed",
+                     f"agent:{agent}",
+                     _jsonb({"provider": provider, "model": model, "error": error,
+                             **(details or {})})),
+                )
+            conn.commit()
+        return run_id
+    except Exception as exc:
+        print(f"[sbvf.store] save_agent_run failed: {exc}")
+        return None
+
+
+def save_assessment(scan_id: int, finding_idx: int, *, finding_id: Optional[int] = None,
+                    provider: str = "", model: str = "",
+                    triage: Optional[Dict] = None, remediation: Optional[Dict] = None,
+                    ) -> Optional[int]:
+    """Persist a per-finding assessment (triage and/or remediation). No-op if both
+    are None or persistence is off."""
+    if triage is None and remediation is None:
+        return None
+    pool = db.get_pool()
+    if pool is None:
+        return None
+    agents = []
+    is_fp = conf = rationale = None
+    rem_summary = rem = None
+    if triage is not None:
+        agents.append("triage")
+        is_fp = bool(triage.get("is_false_positive", False))
+        conf = triage.get("confidence")
+        rationale = triage.get("rationale")
+    if remediation is not None:
+        agents.append("remediation")
+        rem_summary = remediation.get("summary")
+        rem = remediation.get("remediation")
+    try:
+        with pool.connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """INSERT INTO finding_assessments
+                       (scan_id, finding_id, finding_idx, provider, model, is_false_positive,
+                        confidence, rationale, remediation_summary, remediation, agents)
+                       VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING id""",
+                    (scan_id, finding_id, finding_idx, provider, model, is_fp, conf,
+                     rationale, rem_summary, rem, _jsonb(agents)),
+                )
+                assessment_id = cur.fetchone()[0]
+                cur.execute(
+                    """INSERT INTO activity_log (scan_id, entity_type, entity_id, action, actor, details)
+                       VALUES (%s,'finding',%s,'finding.assessed',%s,%s)""",
+                    (scan_id, finding_id, f"agent:{'+'.join(agents)}",
+                     _jsonb({"finding_idx": finding_idx, "agents": agents})),
+                )
+            conn.commit()
+        return assessment_id
+    except Exception as exc:
+        print(f"[sbvf.store] save_assessment failed: {exc}")
+        return None
+
+
+def save_prioritization(scan_id: int, *, provider: str = "", model: str = "",
+                        summary: str = "", ranking: Optional[List] = None) -> Optional[int]:
+    """Persist a scan-level risk prioritization."""
+    pool = db.get_pool()
+    if pool is None:
+        return None
+    try:
+        with pool.connection() as conn, conn.cursor() as cur:
+            cur.execute(
+                """INSERT INTO scan_prioritizations (scan_id, provider, model, summary, ranking)
+                   VALUES (%s,%s,%s,%s,%s) RETURNING id""",
+                (scan_id, provider, model, summary, _jsonb(ranking or [])),
+            )
+            pid = cur.fetchone()[0]
+            conn.commit()
+        return pid
+    except Exception as exc:
+        print(f"[sbvf.store] save_prioritization failed: {exc}")
+        return None
+
+
+def get_assessments(scan_id: int) -> List[Dict]:
+    """Most-recent assessment per finding (by finding_idx)."""
+    pool = db.get_pool()
+    if pool is None:
+        return []
+    try:
+        with pool.connection() as conn, conn.cursor() as cur:
+            cur.execute(
+                """SELECT DISTINCT ON (finding_idx)
+                          finding_idx, is_false_positive, confidence, rationale,
+                          remediation_summary, remediation, provider, model, agents, created_at
+                   FROM finding_assessments WHERE scan_id = %s
+                   ORDER BY finding_idx, created_at DESC""", (scan_id,))
+            cols = ["finding_idx", "is_false_positive", "confidence", "rationale",
+                    "remediation_summary", "remediation", "provider", "model", "agents",
+                    "created_at"]
+            out = []
+            for r in cur.fetchall():
+                d = dict(zip(cols, r))
+                d["created_at"] = d["created_at"].isoformat()
+                out.append(d)
+            return out
+    except Exception as exc:
+        print(f"[sbvf.store] get_assessments failed: {exc}")
+        return []
+
+
+def get_prioritization(scan_id: int) -> Optional[Dict]:
+    """Most-recent scan prioritization, or None."""
+    pool = db.get_pool()
+    if pool is None:
+        return None
+    try:
+        with pool.connection() as conn, conn.cursor() as cur:
+            cur.execute(
+                """SELECT summary, ranking, provider, model, created_at
+                   FROM scan_prioritizations WHERE scan_id = %s
+                   ORDER BY created_at DESC LIMIT 1""", (scan_id,))
+            row = cur.fetchone()
+            if row is None:
+                return None
+            return {"summary": row[0], "ranking": row[1], "provider": row[2],
+                    "model": row[3], "created_at": row[4].isoformat()}
+    except Exception as exc:
+        print(f"[sbvf.store] get_prioritization failed: {exc}")
+        return None
+
+
+def get_ai(scan_id: int) -> Dict:
+    """Combined AI output for a scan: assessments + prioritization."""
+    return {"assessments": get_assessments(scan_id),
+            "prioritization": get_prioritization(scan_id)}

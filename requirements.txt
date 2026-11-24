@@ -3,3 +3,9 @@
 # library alone; these are only needed when DATABASE_URL is configured.
 psycopg[binary]>=3.2
 psycopg_pool>=3.2
+
+# Optional dependencies for the AI-agents layer (sbvf/agents/). Lazy-imported:
+# only needed when the matching provider is configured. The local Ollama provider
+# uses the standard library alone and needs nothing here.
+anthropic>=0.40        # ANTHROPIC_API_KEY (Claude)
+openai>=1.50           # OPENAI_API_KEY

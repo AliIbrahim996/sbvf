@@ -56,8 +56,60 @@ CREATE TABLE IF NOT EXISTS activity_log (
     details     jsonb NOT NULL DEFAULT '{}'::jsonb
 );
 
+-- ---------------------------------------------------------------------------
+-- Phase 2: AI-agents layer. All optional; written only through repository.py
+-- when an AI provider is configured. The core scanner never touches these.
+-- ---------------------------------------------------------------------------
+
+-- One row per agent invocation over a scan (audit of the AI runs themselves).
+CREATE TABLE IF NOT EXISTS agent_runs (
+    id          BIGSERIAL PRIMARY KEY,
+    created_at  timestamptz NOT NULL DEFAULT now(),
+    scan_id     bigint NOT NULL REFERENCES scans(id) ON DELETE CASCADE,
+    agent       text NOT NULL,               -- 'triage' | 'remediation' | 'prioritization'
+    provider    text,                        -- 'claude' | 'openai' | 'ollama'
+    model       text,
+    status      text NOT NULL DEFAULT 'completed',   -- 'completed' | 'error'
+    duration_ms integer,
+    error       text,
+    details     jsonb NOT NULL DEFAULT '{}'::jsonb
+);
+
+-- Per-finding AI assessment: triage (false-positive judgement) + remediation,
+-- merged into one row per analysis run. Reads take the most recent per finding.
+CREATE TABLE IF NOT EXISTS finding_assessments (
+    id                 BIGSERIAL PRIMARY KEY,
+    created_at         timestamptz NOT NULL DEFAULT now(),
+    scan_id            bigint NOT NULL REFERENCES scans(id) ON DELETE CASCADE,
+    finding_id         bigint REFERENCES findings(id) ON DELETE CASCADE,
+    finding_idx        integer NOT NULL,     -- stable position within the scan
+    provider           text,
+    model              text,
+    is_false_positive  boolean,
+    confidence         real,
+    rationale          text,
+    remediation_summary text,
+    remediation        text,
+    agents             jsonb NOT NULL DEFAULT '[]'::jsonb,   -- which agents contributed
+    details            jsonb NOT NULL DEFAULT '{}'::jsonb
+);
+
+-- Scan-level risk prioritization (one summary + a ranking array per run).
+CREATE TABLE IF NOT EXISTS scan_prioritizations (
+    id          BIGSERIAL PRIMARY KEY,
+    created_at  timestamptz NOT NULL DEFAULT now(),
+    scan_id     bigint NOT NULL REFERENCES scans(id) ON DELETE CASCADE,
+    provider    text,
+    model       text,
+    summary     text,
+    ranking     jsonb NOT NULL DEFAULT '[]'::jsonb
+);
+
 CREATE INDEX IF NOT EXISTS idx_findings_scan      ON findings(scan_id);
 CREATE INDEX IF NOT EXISTS idx_findings_severity  ON findings(severity);
 CREATE INDEX IF NOT EXISTS idx_scans_created      ON scans(created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_activity_created   ON activity_log(created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_activity_scan      ON activity_log(scan_id);
+CREATE INDEX IF NOT EXISTS idx_agent_runs_scan    ON agent_runs(scan_id);
+CREATE INDEX IF NOT EXISTS idx_assessments_scan   ON finding_assessments(scan_id);
+CREATE INDEX IF NOT EXISTS idx_prioritizations_scan ON scan_prioritizations(scan_id);

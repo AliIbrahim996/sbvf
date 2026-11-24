@@ -20,6 +20,14 @@ services:
       # Persistence: point the backend at the postgres service. Remove this line
       # (or the db service) to run without persistence — scans still work.
       DATABASE_URL: "postgresql://sbvf:sbvf@db:5432/sbvf"
+      # AI-agents layer (optional). Set one or more to enable triage, remediation
+      # and prioritization on the scan-detail page. Absent → AI is simply off.
+      # Values are read from your host environment; nothing is committed.
+      # SBVF_AI_PROVIDER: "claude"            # force claude | openai | ollama
+      ANTHROPIC_API_KEY: "${ANTHROPIC_API_KEY:-}"
+      OPENAI_API_KEY: "${OPENAI_API_KEY:-}"
+      # SBVF_AI_MODEL: "claude-3-5-sonnet-latest"
+      # OLLAMA_URL: "http://host.docker.internal:11434"
     # Mount the source over the image copy so code changes are picked up on a
     # container restart, without rebuilding the image. Remove these lines to run
     # the self-contained image as built.

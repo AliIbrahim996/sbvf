@@ -501,3 +501,37 @@ footer { margin-top: 30px; color: var(--faint); font-size: 12px; text-align: cen
   .fhead { flex-wrap: wrap; }
   .floc { width: 100%; order: 5; }
 }
+
+/* ---- AI-agents layer (Phase 2) ---- */
+.ai-run .card-head h2 { display: flex; align-items: center; }
+.ai-progress { margin: 2px 0 0; color: var(--accent-ink); font-size: 13.5px; font-weight: 600; }
+.ai-err { margin: 6px 0 0; color: var(--bad, #c0392b); font-size: 13.5px; font-weight: 600; }
+.ai-note { margin: 10px 0 0; color: var(--muted); font-size: 12.5px; line-height: 1.5; }
+.ai-summary { margin-top: 14px; padding: 13px 15px; background: var(--accent-soft);
+  border: 1px solid var(--line); border-radius: var(--radius-sm); }
+.ai-summary .eyebrow { color: var(--accent-ink); }
+.ai-summary p { margin: 6px 0 0; color: var(--ink-soft); font-size: 14px; line-height: 1.55; }
+
+/* Header badges on a finding card */
+.aibadge { display: inline-flex; align-items: center; gap: 6px; font-size: 11px; font-weight: 700;
+  padding: 3px 9px; border-radius: 999px; letter-spacing: .02em; white-space: nowrap; }
+.aibadge b { font-weight: 800; opacity: .85; }
+.aibadge.fp { background: color-mix(in srgb, var(--muted) 18%, transparent); color: var(--muted); }
+.aibadge.tp { background: var(--accent-soft); color: var(--accent-ink); }
+.airisk { display: inline-flex; align-items: center; font-size: 11px; font-weight: 700;
+  padding: 3px 9px; border-radius: 999px; background: var(--surface-2); color: var(--ink-soft);
+  border: 1px solid var(--line); white-space: nowrap; }
+.finding.is-fp { opacity: .72; }
+.finding.is-fp:hover { opacity: 1; }
+
+/* AI analysis panel inside an expanded finding */
+.panel.ai { border-top: 1px dashed var(--line); margin-top: 2px; padding-top: 14px; }
+.eyebrow.aipanel { color: var(--accent-ink); display: flex; align-items: center; gap: 7px; }
+.eyebrow.aipanel svg { width: 15px; height: 15px; }
+.aimeta { margin-left: auto; font-size: 10.5px; font-weight: 600; color: var(--muted);
+  text-transform: none; letter-spacing: 0; font-family: var(--font-mono-stack); }
+.airat { margin: 2px 0 8px; font-size: 13.5px; color: var(--ink-soft); line-height: 1.55; }
+.aisum { margin: 0 0 8px; font-size: 14px; font-weight: 600; color: var(--ink); }
+.airem { white-space: pre-wrap; background: var(--surface-2); border: 1px solid var(--line);
+  border-radius: var(--radius-sm); padding: 11px 13px; font-size: 12.5px; line-height: 1.5;
+  font-family: var(--font-mono-stack); color: var(--ink-soft); overflow-x: auto; }

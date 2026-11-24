@@ -73,6 +73,43 @@ export interface ActivityEntry {
   details: Record<string, unknown>;
 }
 
+// ---- AI-agents layer (Phase 2) ----
+export interface Assessment {
+  finding_idx: number;
+  is_false_positive: boolean | null;
+  confidence: number | null;
+  rationale: string;
+  remediation_summary: string | null;
+  remediation: string | null;
+  provider?: string;
+  model?: string;
+  agents?: string[];
+}
+
+export interface RankItem {
+  idx: number;
+  risk_score: number;
+  reason: string;
+}
+
+export interface Prioritization {
+  summary: string;
+  ranking: RankItem[];
+  provider?: string;
+  model?: string;
+  created_at?: string;
+}
+
+export interface ScanAi {
+  assessments: Assessment[];
+  prioritization: Prioritization | null;
+}
+
+export interface AiStatus {
+  enabled: boolean;
+  providers: string[];
+}
+
 export const SAMPLES: { value: string; label: string }[] = [
   { value: "php_native", label: "PHP · native" },
   { value: "php_yii", label: "PHP · Yii" },
