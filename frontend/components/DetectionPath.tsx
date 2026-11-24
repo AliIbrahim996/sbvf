@@ -1,5 +1,5 @@
 "use client";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import type { Finding } from "@/lib/types";
 import { buildDetectionPath, type StepKind } from "@/lib/detectionPath";
 
@@ -86,7 +86,6 @@ export function DetectionPath({ finding }: { finding: Finding }) {
   const [i, setI] = useState(0);
   const [playing, setPlaying] = useState(false);
   const last = steps.length - 1;
-  const activeRef = useRef<HTMLButtonElement | null>(null);
 
   useEffect(() => {
     if (!playing) return;
@@ -116,14 +115,13 @@ export function DetectionPath({ finding }: { finding: Finding }) {
         </span>
       </div>
 
-      <ol className="dpgraph" style={{ ["--active" as string]: i }}>
+      <ol className="dpgraph">
         {steps.map((s, idx) => {
           const state = idx < i ? "done" : idx === i ? "active" : "next";
           return (
             <li key={idx} className={`dpnode ${state} k-${s.kind}`}>
               <button
                 type="button"
-                ref={idx === i ? activeRef : undefined}
                 className="dpdot"
                 onClick={() => go(idx)}
                 aria-current={idx === i}
