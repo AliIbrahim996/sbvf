@@ -313,6 +313,57 @@ class TestTaintKillOnReassignment(unittest.TestCase):
         self.assertTrue(any(f.vuln == "sqli" for f in self._py(src)))
 
 
+class TestInterproceduralPython(unittest.TestCase):
+    """Improvement 4.2: taint follows into and out of locally-defined helpers."""
+
+    def _py(self, src, fw="django"):
+        return PythonAnalyzer(fw).analyze("v.py", src)
+
+    def test_source_returning_helper(self):
+        # get_id() returns user input; the query over its result is SQLi.
+        src = ("def get_id(request):\n"
+               "    return request.GET['id']\n"
+               "def view(request):\n"
+               "    uid = get_id(request)\n"
+               "    cur.execute('SELECT * FROM t WHERE id=' + uid)\n")
+        self.assertTrue(any(f.vuln == "sqli" for f in self._py(src)))
+
+    def test_sink_param_helper(self):
+        # run_cmd funnels its parameter into os.system -> the tainted call is CI.
+        src = ("def run_cmd(cmd):\n"
+               "    os.system(cmd)\n"
+               "def view(request):\n"
+               "    run_cmd(request.GET['c'])\n")
+        self.assertTrue(any(f.vuln == "command_injection" for f in self._py(src)))
+
+    def test_sink_param_helper_sanitized_arg_clean(self):
+        # a shell-escaped argument into the same helper is safe (4.1 + 4.2).
+        src = ("import shlex\n"
+               "def run_cmd(cmd):\n"
+               "    os.system(cmd)\n"
+               "def view(request):\n"
+               "    run_cmd(shlex.quote(request.GET['c']))\n")
+        self.assertEqual([f for f in self._py(src) if f.vuln == "command_injection"], [])
+
+    def test_constant_returning_helper_clean(self):
+        # a helper that returns a constant is not a source -> no false positive.
+        src = ("def label():\n"
+               "    return 'const'\n"
+               "def view(request):\n"
+               "    cur.execute('SELECT * FROM t WHERE a=' + label())\n")
+        self.assertEqual([f for f in self._py(src) if f.vuln == "sqli"], [])
+
+    def test_transitive_source_helper(self):
+        # outer() -> inner() -> request input; the fixpoint must carry it through.
+        src = ("def inner(request):\n"
+               "    return request.GET['q']\n"
+               "def outer(request):\n"
+               "    return inner(request)\n"
+               "def view(request):\n"
+               "    cur.execute('SELECT * FROM t WHERE a=' + outer(request))\n")
+        self.assertTrue(any(f.vuln == "sqli" for f in self._py(src)))
+
+
 class TestParamRecovery(unittest.TestCase):
     """The PHP analyzer records the request parameter + method behind each finding,
     both directly and through an intermediate variable."""

@@ -157,7 +157,8 @@ def _name_of(node) -> str:
 class _FuncScope:
     """Taint state for a single function (or the synthetic module scope)."""
 
-    def __init__(self, framework: str, func_name: str = "", http_handler: bool = False):
+    def __init__(self, framework: str, func_name: str = "", http_handler: bool = False,
+                 summaries: Optional[dict] = None):
         self.framework = framework
         self.func_name = func_name
         self.http_handler = http_handler   # method of an http.server RequestHandler
@@ -165,6 +166,17 @@ class _FuncScope:
         self.tainted = {}   # var name -> human-readable source description
         self.sanitized = {} # var name -> frozenset of classes it is already safe for
         self.origin = {}    # var name -> (request param, input method)
+        # Inter-procedural summaries (improvement 4.2): name -> {params,
+        # returns_source, sink_params}. Shared ref so fixpoint updates are visible.
+        self.summaries = summaries if summaries is not None else {}
+
+    def _returns_source_call(self, node) -> bool:
+        """True if *node* calls a local helper that hands back user input."""
+        if not isinstance(node, ast.Call):
+            return False
+        fname = _name_of(node.func)
+        s = self.summaries.get(fname) or self.summaries.get(fname.split(".")[-1])
+        return bool(s and s["returns_source"])
 
     # --- request-parameter recovery (for the SAST-guided dynamic search) ----
 
@@ -308,6 +320,8 @@ class _FuncScope:
                 return None
             # Sanitized for another class only: taint still flows for *vuln*
             # through the wrapped argument(s) -> fall through to the children.
+        if self._returns_source_call(node):           # 4.2: source-returning helper
+            return f"user input (returned by {_name_of(node.func)}())"
         direct = self.is_source_expr(node)
         if direct:
             return direct
@@ -340,6 +354,8 @@ class _FuncScope:
             if src is None:
                 return None, frozenset()
             return src, inner | sc                 # safe for this class downstream
+        if self._returns_source_call(node):           # 4.2: source-returning helper
+            return f"user input (returned by {_name_of(node.func)}())", frozenset()
         direct = self.is_source_expr(node)
         if direct:
             return direct, frozenset()
@@ -383,8 +399,16 @@ class PythonAnalyzer:
         self._on_source = on_source
         findings: List[Finding] = []
 
+        # Inter-procedural summaries (improvement 4.2): learn, for every function
+        # in the file, whether it RETURNS user input (a source-returning helper)
+        # and which of its parameters flow to a dangerous SINK. Built before the
+        # main pass so call sites can use them. (Taint flowing *through* an
+        # argument to the call's result is already handled by call propagation.)
+        self._summaries = {}
+        self._build_summaries(tree)
+
         # Module-level (native scripts with no functions) plus each function body.
-        module_scope = _FuncScope(self.framework)
+        module_scope = _FuncScope(self.framework, summaries=self._summaries)
         self._seed_module(tree, module_scope)
         self._fixpoint(tree.body, module_scope)
         self._collect_sinks(tree.body, module_scope, findings)
@@ -401,12 +425,92 @@ class PythonAnalyzer:
         for node in ast.walk(tree):
             if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
                 scope = _FuncScope(self.framework, node.name,
-                                   http_handler=id(node) in handler_methods)
+                                   http_handler=id(node) in handler_methods,
+                                   summaries=self._summaries)
                 scope.guarded = self._has_ownership_guard(node)
                 self._seed_params(node, scope)
                 self._fixpoint(node.body, scope)
                 self._collect_sinks(node.body, scope, findings)
         return findings
+
+    # --- inter-procedural summaries (improvement 4.2) -----------------------
+
+    def _param_names(self, func) -> List[str]:
+        """Positional-then-keyword parameter names of *func*, minus framework
+        objects (self/request/db/...) that are never a caller-supplied value."""
+        a = func.args
+        names = [p.arg for p in (list(a.posonlyargs) + list(a.args) + list(a.kwonlyargs))]
+        return [n for n in names if n not in PARAM_SKIP]
+
+    def _build_summaries(self, tree):
+        """Fixpoint over every function: record returns_source (the function hands
+        back user input) and sink_params (a parameter reaches a sink inside it).
+        Iterated because one helper may call another."""
+        funcs = {}
+        for node in ast.walk(tree):
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                funcs[node.name] = node        # last definition of a name wins
+        for name, f in funcs.items():
+            self._summaries[name] = {"params": self._param_names(f),
+                                     "returns_source": False, "sink_params": set()}
+        for _ in range(8):
+            changed = False
+            for name, f in funcs.items():
+                rs, sp = self._summarize_func(f)
+                cur = self._summaries[name]
+                if rs != cur["returns_source"] or sp != cur["sink_params"]:
+                    cur["returns_source"], cur["sink_params"] = rs, sp
+                    changed = True
+            if not changed:
+                break
+
+    def _summarize_func(self, func):
+        """Analyze *func* with every parameter treated as tainted, and report
+        (returns_source, {(param, vuln)}). Uses the current summaries for any
+        helper it calls, so the enclosing fixpoint converges."""
+        scope = _FuncScope(self.framework, func.name, summaries=self._summaries)
+        for p in self._param_names(func):
+            scope.tainted[p] = f"parameter '{p}'"
+            scope.origin[p] = (p, "PARAM")
+        self._fixpoint(func.body, scope)
+
+        # sink_params: run the (flow-sensitive) sink pass into a throwaway list;
+        # a finding whose recovered origin is a parameter is a parameter->sink flow.
+        tmp: List[Finding] = []
+        self._collect_sinks(func.body, scope, tmp)
+        params = set(self._param_names(func))
+        sink_params = {(f.param, f.vuln) for f in tmp
+                       if f.method == "PARAM" and f.param in params}
+
+        # returns_source: a return value tainted by a real input source (not just
+        # a parameter, whose through-flow the caller already models).
+        returns_source = False
+        for node in self._scope_nodes(func.body):
+            if isinstance(node, ast.Return) and node.value is not None:
+                if scope.taint_of(node.value):
+                    ep = scope.origin_of(node.value)
+                    if ep is None or ep[1] != "PARAM":
+                        returns_source = True
+                        break
+        return returns_source, sink_params
+
+    def _call_summary(self, node):
+        """The summary for a call to a locally-defined function, or None."""
+        if not isinstance(node, ast.Call):
+            return None
+        fname = _name_of(node.func)
+        return self._summaries.get(fname) or self._summaries.get(fname.split(".")[-1])
+
+    def _arg_for_param(self, call, params, pname):
+        """The argument expression a call passes for parameter *pname*, or None."""
+        for kw in call.keywords:
+            if kw.arg == pname:
+                return kw.value
+        try:
+            idx = params.index(pname)
+        except ValueError:
+            return None
+        return call.args[idx] if idx < len(call.args) else None
 
     def _func_source(self, func) -> str:
         start = max(0, getattr(func, "lineno", 1) - 1)
@@ -802,6 +906,19 @@ class PythonAnalyzer:
             src = first_tainted(pos[:1], "ssrf")
             if src:
                 return self._emit(findings, "ssrf", node, fname, src, scope)
+
+        # Inter-procedural (4.2): a call to a local helper that funnels one of its
+        # parameters into a sink -> flag if the matching argument is tainted.
+        summ = self._call_summary(node)
+        if summ and summ["sink_params"]:
+            for pname, vuln in summ["sink_params"]:
+                arg = self._arg_for_param(node, summ["params"], pname)
+                if arg is None:
+                    continue
+                src = scope.taint_of(arg, vuln)
+                if src:
+                    return self._emit(findings, vuln, node,
+                                      f"{fname}() -> {vuln} sink", src, scope)
 
     def _emit(self, findings, vuln, node, sink, source, scope):
         line = getattr(node, "lineno", 0)
