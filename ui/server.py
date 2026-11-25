@@ -80,16 +80,19 @@ SCAN_JOB_TTL = 300   # seconds a registered-but-unstarted job stays valid
 
 # Hostnames accepted in the `Host`/`Origin` headers. localhost forms always pass;
 # SBVF_ALLOWED_HOSTS adds more (e.g. the compose service name "sbvf", which the
-# Next.js proxy uses when it calls the backend as http://sbvf:8080).
-_LOCAL_HOST_NAMES = {"127.0.0.1", "localhost", "[::1]", "::1", ""}
+# Next.js proxy uses when it calls the backend as http://sbvf:8080). An empty
+# string is deliberately absent, so a missing Host or an `Origin: null` is refused.
+_LOCAL_HOST_NAMES = {"127.0.0.1", "localhost", "[::1]", "::1"}
 
 
 def _host_only(value: str) -> str:
     """The hostname part of a `Host`/`Origin` netloc, lower-cased, port removed."""
     h = (value or "").strip().lower()
-    if h.startswith("["):                 # [::1] or [::1]:8080
+    if h.startswith("["):                 # bracketed IPv6: [::1] or [::1]:8080
         return h.split("]", 1)[0] + "]"
-    return h.rsplit(":", 1)[0] if ":" in h else h
+    if h.count(":") == 1:                 # host:port
+        return h.rsplit(":", 1)[0]
+    return h                              # bare hostname, or unbracketed IPv6 (no port)
 
 
 def allowed_host_names() -> set:

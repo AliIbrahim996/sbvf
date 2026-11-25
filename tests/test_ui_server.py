@@ -96,6 +96,22 @@ class TestRequestGuard(unittest.TestCase):
                                   body='{"sample":"php_native"}')
             self.assertEqual(status, 415)
 
+    def test_null_origin_is_rejected(self):
+        with _Server() as s:
+            status, _ = s.request("GET", "/api/ai/status", headers={"Origin": "null"})
+            self.assertEqual(status, 403)
+
+    def test_host_only_parses_ports_and_ipv6(self):
+        self.assertEqual(server._host_only("127.0.0.1:8080"), "127.0.0.1")
+        self.assertEqual(server._host_only("sbvf:8080"), "sbvf")
+        self.assertEqual(server._host_only("[::1]:8080"), "[::1]")
+        self.assertEqual(server._host_only("::1"), "::1")          # bare IPv6, no port
+        self.assertEqual(server._host_only(""), "")
+
+    def test_missing_host_is_not_implicitly_allowed(self):
+        # "" must not be an accepted hostname, so a missing/empty Host is refused.
+        self.assertNotIn("", server.allowed_host_names())
+
     def test_extra_allowed_host_via_env(self):
         os.environ["SBVF_ALLOWED_HOSTS"] = "sbvf"
         try:
