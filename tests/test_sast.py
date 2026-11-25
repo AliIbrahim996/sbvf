@@ -364,6 +364,46 @@ class TestInterproceduralPython(unittest.TestCase):
         self.assertTrue(any(f.vuln == "sqli" for f in self._py(src)))
 
 
+class TestInterproceduralPhp(unittest.TestCase):
+    """Improvement 4.2 (PHP): taint follows into and out of user-defined functions."""
+
+    def _php(self, src):
+        return PhpAnalyzer("php-native").analyze("x.php", src)
+
+    def test_source_returning_helper(self):
+        src = ("<?php\n"
+               "function getId() { return $_GET['id']; }\n"
+               "$x = getId();\n"
+               "mysqli_query($c, \"SELECT * FROM t WHERE id=\" . $x);\n")
+        self.assertTrue(any(f.vuln == "sqli" for f in self._php(src)))
+
+    def test_sink_param_helper(self):
+        src = ("<?php\n"
+               "function runCmd($cmd) { system($cmd); }\n"
+               "runCmd($_GET['c']);\n")
+        self.assertTrue(any(f.vuln == "command_injection" for f in self._php(src)))
+
+    def test_sink_param_helper_sanitized_arg_clean(self):
+        # shell-escaped argument into the same helper is safe (4.1 + 4.2).
+        src = ("<?php\n"
+               "function runCmd($cmd) { system($cmd); }\n"
+               "runCmd(escapeshellarg($_GET['c']));\n")
+        self.assertEqual([f for f in self._php(src) if f.vuln == "command_injection"], [])
+
+    def test_constant_returning_helper_clean(self):
+        src = ("<?php\n"
+               "function label() { return 'const'; }\n"
+               "mysqli_query($c, \"SELECT * FROM t WHERE a=\" . label());\n")
+        self.assertEqual([f for f in self._php(src) if f.vuln == "sqli"], [])
+
+    def test_transitive_source_helper(self):
+        src = ("<?php\n"
+               "function inner() { return $_GET['q']; }\n"
+               "function outer() { return inner(); }\n"
+               "mysqli_query($c, \"SELECT * FROM t WHERE a=\" . outer());\n")
+        self.assertTrue(any(f.vuln == "sqli" for f in self._php(src)))
+
+
 class TestParamRecovery(unittest.TestCase):
     """The PHP analyzer records the request parameter + method behind each finding,
     both directly and through an intermediate variable."""
