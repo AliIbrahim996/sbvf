@@ -15,7 +15,7 @@ from __future__ import annotations
 import re
 from typing import Callable, List, Optional, Tuple
 
-from .model import Finding
+from .model import INJECTION_CLASSES, Finding
 
 
 # --- Sources (user input), scoped per framework -----------------------------
@@ -42,14 +42,42 @@ LARAVEL_SOURCES = [
     (re.compile(r"\$request\[\s*['\"]"), "Laravel request array"),
 ]
 
-# Sanitizers: if one wraps the tainted token, the statement is considered safe.
-# Function-style sanitizers wrap their argument in parentheses ...
+# Sanitizers, tied to the vulnerability class(es) each one actually neutralises
+# (improvement 4.1). A sanitizer wrapping the tainted token makes the value safe
+# *only* for its classes: htmlspecialchars stops XSS but not SQL injection, so
+# ``mysqli_query("... " . htmlspecialchars($_GET['x']))`` is still reported.
+# Function-style sanitizers wrap their argument in parentheses; the capture group
+# names the function so its class set can be looked up.
 SANITIZER_FUNCS = re.compile(
     r"\b(htmlspecialchars|htmlentities|intval|floatval|mysqli_real_escape_string|"
     r"real_escape_string|escapeshellarg|escapeshellcmd|basename|filter_var|"
     r"Html::encode|urlencode|ctype_digit|preg_quote|e)\s*\(")
 # ... while a cast neutralises the value without parentheses: (int) $x
 CAST_SAN = re.compile(r"\((?:int|integer|float|double|bool|boolean)\)")
+
+# Which vulnerability classes each sanitizer neutralises. A value that is cast to
+# a number or percent-encoded is safe across every injection sink (the full
+# INJECTION_CLASSES set); an output/context encoder is safe only for its context.
+# Access-control classes (IDOR) are never in a sanitizer set — see model.py.
+SANITIZER_CLASSES = {
+    "htmlspecialchars": frozenset({"xss"}),
+    "htmlentities": frozenset({"xss"}),
+    "html::encode": frozenset({"xss"}),
+    "e": frozenset({"xss"}),                       # Blade/Laravel e() escaper
+    "mysqli_real_escape_string": frozenset({"sqli"}),
+    "real_escape_string": frozenset({"sqli"}),
+    "escapeshellarg": frozenset({"command_injection"}),
+    "escapeshellcmd": frozenset({"command_injection"}),
+    "basename": frozenset({"file_inclusion", "path_traversal"}),
+    "urlencode": INJECTION_CLASSES,                # percent-encoding: no raw metachars
+    "intval": INJECTION_CLASSES,
+    "floatval": INJECTION_CLASSES,
+    "ctype_digit": INJECTION_CLASSES,              # numeric validation
+    "filter_var": INJECTION_CLASSES,               # validating filter / FILTER_SANITIZE_*
+    "preg_quote": frozenset(),                     # regex escaping: not a web-sink sanitizer
+}
+# A numeric/boolean cast neutralises every injection class.
+_CAST_CLASSES = INJECTION_CLASSES
 
 # --- Sinks ------------------------------------------------------------------
 # Each entry: (vuln, compiled-regex that matches the sink keyword/call head).
@@ -98,6 +126,7 @@ class PhpAnalyzer:
         self._lines = source.splitlines()
         self._on_source = on_source
         tainted = {}            # "$var" -> source description
+        self._sanitized = {}    # "$var" -> frozenset of classes it is already safe for
         self._origin = {}       # "$var" -> (param, method) of its originating input
         findings: List[Finding] = []
 
@@ -115,9 +144,10 @@ class PhpAnalyzer:
                 if not m:
                     continue
                 var, rhs = m.group(1), m.group(2)
-                src = self._taint_in(rhs, tainted)
+                src, san = self._taint_rhs(rhs, tainted)
                 if src and var not in tainted:
                     tainted[var] = src
+                    self._sanitized[var] = san
                     self._remember_origin(var, rhs)
                     changed = True
                     if on_source:
@@ -217,30 +247,66 @@ class PhpAnalyzer:
                 return label
         return None
 
-    def _taint_in(self, text: str, tainted: dict) -> Optional[str]:
-        """Return a source description if *text* carries unsanitized taint."""
+    def _taint_in(self, text: str, tainted: dict, vuln: Optional[str] = None) -> Optional[str]:
+        """Return a source description if *text* carries taint that is NOT
+        sanitized for vulnerability class *vuln* (improvement 4.1).
+
+        When *vuln* is None any sanitizer suppresses the taint (the pre-4.1
+        behaviour, used by the access-control sinks that content sanitizers do
+        not address, e.g. IDOR)."""
         # A direct source reference.
         src = self._source_desc(text)
-        if src and not self._is_sanitized(text, src):
-            return src
+        if src:
+            tok = self._source_token(text)
+            if not self._token_safe(text, tok, frozenset(), vuln):
+                return src
         # A previously-tainted variable used in concatenation / interpolation.
         for var, desc in tainted.items():
             if re.search(re.escape(var) + r"\b", text):
-                if not self._is_sanitized(text, var):
+                base = self._sanitized.get(var, frozenset())
+                if not self._token_safe(text, var, base, vuln):
                     return desc
         return None
 
-    def _is_sanitized(self, text: str, token: str) -> bool:
-        """True if a sanitizer (cast or wrapping call) neutralises *token*.
+    def _taint_rhs(self, rhs: str, tainted: dict) -> Tuple[Optional[str], frozenset]:
+        """For an assignment RHS, return (source description, classes it is safe
+        for). A value neutralised for *every* injection class is treated as
+        clean (returns (None, ...)), so it never taints the target."""
+        src = self._source_desc(rhs)
+        if src:
+            san = self._wrap_classes(rhs, self._source_token(rhs))
+            if INJECTION_CLASSES <= san:
+                return None, frozenset()
+            return src, san
+        for var, desc in tainted.items():
+            if re.search(re.escape(var) + r"\b", rhs):
+                san = self._sanitized.get(var, frozenset()) | self._wrap_classes(rhs, var)
+                if INJECTION_CLASSES <= san:
+                    continue
+                return desc, san
+        return None, frozenset()
 
-        The cast/sanitizer must apply to *this* token, not merely appear
-        somewhere in the statement: ``(int)$id . $_GET['x']`` sanitizes ``$id``
-        but leaves ``$_GET['x']`` tainted.
-        """
+    def _source_token(self, text: str) -> str:
+        """The literal text of the first direct input source in *text* (used as
+        the token a wrapping sanitizer must cover)."""
+        for rx, _ in self.sources:
+            m = rx.search(text)
+            if m:
+                return m.group(0)
+        return ""
+
+    def _wrap_classes(self, text: str, token: str) -> frozenset:
+        """The set of vulnerability classes neutralised for *token* by a cast or
+        wrapping sanitizer call in *text*. The cast/sanitizer must apply to this
+        token, not merely appear in the statement: ``(int)$id . $_GET['x']``
+        sanitizes ``$id`` but leaves ``$_GET['x']`` tainted."""
+        if not token:
+            return frozenset()
+        classes: set = set()
         # A numeric/boolean cast directly applied to the token, e.g. (int) $x.
         for cm in CAST_SAN.finditer(text):
             if re.match(r"\s*" + re.escape(token) + r"\b", text[cm.end():]):
-                return True
+                classes |= _CAST_CLASSES
         # A function-style sanitizer whose balanced-paren region covers the token.
         for sm in SANITIZER_FUNCS.finditer(text):
             open_idx = text.find("(", sm.start())
@@ -248,8 +314,17 @@ class PhpAnalyzer:
                 continue
             region = self._arg_region(text, open_idx)
             if token in region or self._source_desc(region):
-                return True
-        return False
+                classes |= SANITIZER_CLASSES.get(sm.group(1).lower(), frozenset())
+        return frozenset(classes)
+
+    def _token_safe(self, text: str, token: str, base: frozenset,
+                    vuln: Optional[str]) -> bool:
+        """True if *token* is sanitized (for class *vuln*, or by any sanitizer
+        when *vuln* is None) given classes *base* it already carries."""
+        san = base | self._wrap_classes(text, token)
+        if vuln is None:
+            return bool(san)
+        return vuln in san
 
     # --- sink checks --------------------------------------------------------
 
@@ -271,7 +346,7 @@ class PhpAnalyzer:
         m = SQLI_SINKS.search(stmt)
         if m:
             region = self._region_after(stmt, m)
-            src = self._taint_in(region, tainted)
+            src = self._taint_in(region, tainted, "sqli")
             if src and self._is_dynamic(region):
                 return self._emit(findings, "sqli", line, m.group(0).strip("("),
                                   src, region)
@@ -280,7 +355,7 @@ class PhpAnalyzer:
         m = CMD_SINKS.search(stmt)
         if m:
             region = self._region_after(stmt, m)
-            src = self._taint_in(region, tainted)
+            src = self._taint_in(region, tainted, "command_injection")
             if src:
                 return self._emit(findings, "command_injection", line,
                                   m.group(1), src, region)
@@ -289,7 +364,7 @@ class PhpAnalyzer:
         m = CODE_SINKS.search(stmt)
         if m:
             region = self._region_after(stmt, m)
-            src = self._taint_in(region, tainted)
+            src = self._taint_in(region, tainted, "code_injection")
             if src:
                 return self._emit(findings, "code_injection", line, m.group(1),
                                   src, region)
@@ -298,18 +373,20 @@ class PhpAnalyzer:
         m = INCLUDE_SINKS.search(stmt)
         if m:
             region = stmt[m.end():]
-            src = self._taint_in(region, tainted)
+            src = self._taint_in(region, tainted, "file_inclusion")
             if src and self._is_dynamic(region):
                 return self._emit(findings, "file_inclusion", line,
                                   m.group(0).strip(), src, region)
 
         # IDOR: Eloquent fetch-by-id on tainted input, no ownership check in the
-        # enclosing function (falls back to file scope for top-level code).
+        # enclosing function (falls back to file scope for top-level code). A
+        # content sanitizer (even an int cast) does not make an id non-IDOR, so
+        # this sink keeps the pre-4.1 "any sanitizer suppresses" semantics.
         if not self._line_guarded(line):
             m = IDOR_SINKS.search(stmt)
             if m:
                 region = self._region_after(stmt, m)
-                src = self._taint_in(region, tainted)
+                src = self._taint_in(region, tainted, None)
                 if src:
                     return self._emit(findings, "idor", line,
                                       (m.group(1) or m.group(2)), src, region)
@@ -318,7 +395,7 @@ class PhpAnalyzer:
         m = ECHO_SINKS.search(stmt)
         if m:
             region = stmt[m.end():]
-            src = self._taint_in(region, tainted)
+            src = self._taint_in(region, tainted, "xss")
             if src:
                 return self._emit(findings, "xss", line, m.group(1), src, region)
 
@@ -326,7 +403,7 @@ class PhpAnalyzer:
         if "`" in stmt:
             bt = re.search(r"`([^`]*)`", stmt)
             if bt:
-                src = self._taint_in(bt.group(1), tainted)
+                src = self._taint_in(bt.group(1), tainted, "command_injection")
                 if src:
                     return self._emit(findings, "command_injection", line,
                                       "backticks", src, bt.group(1))
@@ -356,7 +433,7 @@ class PhpAnalyzer:
     def _check_blade(self, source, tainted, findings):
         for mo in re.finditer(r"\{!!(.+?)!!\}", source, re.DOTALL):
             region = mo.group(1)
-            src = self._taint_in(region, tainted) or self._source_desc(region)
+            src = self._taint_in(region, tainted, "xss") or self._source_desc(region)
             if src:
                 line = source[:mo.start()].count("\n") + 1
                 self._emit(findings, "xss", line, "{!! !!} raw echo", src, region)

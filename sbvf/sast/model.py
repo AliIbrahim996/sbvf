@@ -335,6 +335,18 @@ VULN_INFO = {
     },
 }
 
+# Injection vulnerability classes whose taint a *content-neutralising* sanitizer
+# (a numeric cast, percent-/base64-encoding, etc.) renders safe. Deliberately
+# excludes access-control classes like IDOR: casting a request id to an integer
+# still yields a valid object reference, so it must not suppress an IDOR finding.
+# A sanitizer tied to one class (htmlspecialchars -> xss, escapeshellarg ->
+# command_injection) neutralises only that class; a universal sanitizer covers
+# this whole set. See sbvf/sast/php.py and python_analyzer.py (improvement 4.1).
+INJECTION_CLASSES = frozenset({
+    "sqli", "xss", "command_injection", "code_injection",
+    "file_inclusion", "path_traversal", "open_redirect", "ssrf",
+})
+
 # Severity ordering for sorting the report (most serious first).
 SEVERITY_RANK = {"critical": 0, "high": 1, "medium": 2, "low": 3}
 # Breka-style remediation urgency ladder, by severity.
