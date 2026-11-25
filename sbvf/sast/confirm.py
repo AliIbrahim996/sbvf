@@ -58,7 +58,9 @@ def confirm_findings(findings: List[dict], base_url: str, *,
         {"confirmed": True, "checks": [{vuln, path, param, method, where,
                                         algorithm, evals, payload}, ...]}
 
-    Returns ``{"attempted": n, "confirmed": m}``. Raises :class:`TargetUnreachable`
+    Returns ``{"attempted": n, "confirmed": m, "findings": k}`` where *attempted*
+    and *confirmed* count probes (so they share a unit) and *findings* is how many
+    distinct findings were confirmed. Raises :class:`TargetUnreachable`
     if the base URL cannot be reached at all (so the caller can report it without
     losing the static result). ``Target`` raises ``ValueError`` for a non-local
     host unless *allow_remote* is set.
@@ -82,7 +84,7 @@ def confirm_findings(findings: List[dict], base_url: str, *,
         raise TargetUnreachable(
             f"could not reach {base_url} - is the application running there? ({exc})")
 
-    attempted = confirmed = 0
+    attempted = confirmed = findings_confirmed = 0
     for f in findings:
         eps, _ = derive_endpoints([f], strip_prefix, routes or {})
         if not eps:
@@ -111,5 +113,7 @@ def confirm_findings(findings: List[dict], base_url: str, *,
                 step("confirm", f"   not reproduced: {label} at {e.path}{where}")
         if checks:
             f["dynamic"] = {"confirmed": True, "checks": checks}
-            confirmed += 1
-    return {"attempted": attempted, "confirmed": confirmed}
+            confirmed += len(checks)         # confirmed probes, same unit as attempted
+            findings_confirmed += 1
+    return {"attempted": attempted, "confirmed": confirmed,
+            "findings": findings_confirmed}

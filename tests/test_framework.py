@@ -327,7 +327,9 @@ class TestLiveConfirmation(unittest.TestCase):
         res = scan_path(self.SAMPLE)
         summary = confirm_findings(res["findings"], self.base,
                                    routes=extract_routes(self.SAMPLE))
-        self.assertEqual(summary["confirmed"], 1)
+        # One finding (the IDOR), confirmed by two probes (idor + missing_auth).
+        self.assertEqual(summary["findings"], 1)
+        self.assertEqual((summary["attempted"], summary["confirmed"]), (2, 2))
         f = next(x for x in res["findings"] if x["vuln"] == "idor")
         self.assertTrue(f["dynamic"]["confirmed"])
         kinds = sorted({c["vuln"] for c in f["dynamic"]["checks"]})

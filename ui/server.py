@@ -370,11 +370,16 @@ class UIHandler(BaseHTTPRequestHandler):
                         routes=extract_routes(target), on_step=on_step)
                     self._sse("scan_step", {"kind": "confirm", "text":
                               f"Live confirmation: {summary['confirmed']} of "
-                              f"{summary['attempted']} probe(s) reproduced against "
+                              f"{summary['attempted']} probe(s) reproduced, "
+                              f"confirming {summary['findings']} finding(s) against "
                               f"the running app.", "data": summary})
                 except (ValueError, TargetUnreachable) as exc:
                     self._sse("scan_step", {"kind": "confirm", "text":
                               f"Live confirmation skipped: {exc}", "data": {}})
+                except Exception as exc:   # never lose the static result over confirm
+                    self._sse("scan_step", {"kind": "confirm", "text":
+                              f"Live confirmation failed (static results kept): {exc}",
+                              "data": {}})
 
             # Persist the scan (best-effort; a DB failure must not break the stream).
             try:
