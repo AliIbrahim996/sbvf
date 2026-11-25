@@ -366,15 +366,29 @@ function logLine(rec){
 }
 
 let es,timer;
-el("go").onclick=()=>{
+el("go").onclick=async ()=>{
   if(es) es.close();
   reset();
-  const split=el("split").value, runs=el("runs").value, budget=el("budget").value;
+  const split=el("split").value, runs=+el("runs").value, budget=+el("budget").value;
   el("go").disabled=true; el("pmsg").textContent="Starting…";
   startedAt=Date.now();
   clearInterval(timer);
   timer=setInterval(()=>{el("elapsed").textContent=((Date.now()-startedAt)/1000).toFixed(1)+"s elapsed";},100);
-  es=new EventSource(`/api/run?split=${split}&runs=${runs}&budget=${budget}`);
+  // Start with a same-origin POST, then stream over SSE. The POST (JSON body) is
+  // what stops a cross-site GET from starting a benchmark — see ui/server.py `_guard`.
+  let eventsUrl;
+  try{
+    const res=await fetch("/api/runs",{method:"POST",
+      headers:{"Content-Type":"application/json"},body:JSON.stringify({split,runs,budget})});
+    if(!res.ok){const d=await res.json().catch(()=>({}));
+      throw new Error(d.message||("could not start benchmark ("+res.status+")"));}
+    const d=await res.json(); eventsUrl=d.events_url||("/api/runs/"+d.run_id+"/events");
+  }catch(err){
+    clearInterval(timer);
+    el("pmsg").textContent=err.message||"could not start benchmark";
+    el("go").disabled=false; return;
+  }
+  es=new EventSource(eventsUrl);
 
   es.addEventListener("start",e=>{
     const d=JSON.parse(e.data); el("tot").textContent=d.total;

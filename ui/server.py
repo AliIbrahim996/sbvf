@@ -1,8 +1,9 @@
 """Real-time web UI for running the SBVF benchmark and watching results stream in.
 
 Standard library only. On start it launches the three benchmark apps, then serves:
-  GET  /                 -> the dashboard page
-  GET  /api/run?...      -> Server-Sent Events stream, one event per completed run
+  GET  /                         -> the dashboard page
+  POST /api/runs                 -> register a benchmark run, returns a stream token
+  GET  /api/runs/<token>/events  -> Server-Sent Events, one event per completed run
 
 Open http://127.0.0.1:8080 in a browser.
 """
@@ -70,13 +71,16 @@ _PENDING_BRANCH: dict = {}
 _PENDING_LOCK = threading.Lock()
 BRANCH_SELECT_TIMEOUT = 300   # seconds to wait for the user's branch choice
 
-# A scan is started by `POST /api/scans` (which registers the parameters and
-# returns an opaque token) and then streamed by `GET /api/scans/<token>/events`.
-# Routing the start through a POST (JSON body, same-origin) is what stops a
-# cross-site `<img>`/`<script>` GET from driving the local API (see `_guard`).
+# Registered-but-unstarted jobs, keyed by an opaque token. A scan (`/api/scans`)
+# or a benchmark (`/api/runs`) is started by a same-origin POST that stores its
+# validated parameters here and returns the token, then streamed by a GET on
+# `.../<token>/events`. Routing the start through a POST (JSON body, same-origin)
+# is what stops a cross-site `<img>`/`<script>` GET from driving either one — see
+# `_guard`. Jobs are single-use (popped on stream) and TTL-pruned if abandoned.
 _SCAN_JOBS: dict = {}
-_SCAN_JOBS_LOCK = threading.Lock()
-SCAN_JOB_TTL = 300   # seconds a registered-but-unstarted job stays valid
+_RUN_JOBS: dict = {}
+_JOBS_LOCK = threading.Lock()
+JOB_TTL = 300   # seconds a registered-but-unstarted job stays valid
 
 # Hostnames accepted in the `Host`/`Origin` headers. localhost forms always pass;
 # SBVF_ALLOWED_HOSTS adds more (e.g. the compose service name "sbvf", which the
@@ -122,11 +126,25 @@ def _int_param(qs, name, default, lo, hi):
     return val
 
 
-def _prune_scan_jobs():
-    """Drop registered scan jobs that were never started (bounds memory). Call under lock."""
+def _int_body(body, name, default, lo, hi):
+    """Parse a bounded integer from a JSON body, raising :class:`BadRequest` if invalid."""
+    raw = body.get(name, default)
+    if raw is None or raw == "":
+        raw = default
+    try:
+        val = int(raw)
+    except (TypeError, ValueError):
+        raise BadRequest(f"{name} must be an integer")
+    if not lo <= val <= hi:
+        raise BadRequest(f"{name} must be between {lo} and {hi}")
+    return val
+
+
+def _prune_jobs(jobs: dict) -> None:
+    """Drop registered jobs that were never started (bounds memory). Call under lock."""
     now = time.monotonic()
-    for tok in [t for t, p in _SCAN_JOBS.items() if now - p["created"] > SCAN_JOB_TTL]:
-        _SCAN_JOBS.pop(tok, None)
+    for tok in [t for t, p in jobs.items() if now - p["created"] > JOB_TTL]:
+        jobs.pop(tok, None)
 
 
 class UIHandler(BaseHTTPRequestHandler):
@@ -144,19 +162,36 @@ class UIHandler(BaseHTTPRequestHandler):
         """
         allowed = allowed_host_names()
         if _host_only(self.headers.get("Host", "")) not in allowed:
-            self._json({"message": "forbidden host"}, code=421)
-            return True
+            return self._reject(421, "forbidden host")
         origin = self.headers.get("Origin")
-        if origin:
-            if _host_only(urllib.parse.urlparse(origin).netloc) not in allowed:
-                self._json({"message": "cross-origin request refused"}, code=403)
-                return True
+        if origin and _host_only(urllib.parse.urlparse(origin).netloc) not in allowed:
+            return self._reject(403, "cross-origin request refused")
         if require_json:
             ctype = self.headers.get("Content-Type", "").lower()
             if not ctype.startswith("application/json"):
-                self._json({"message": "Content-Type must be application/json"}, code=415)
-                return True
+                return self._reject(415, "Content-Type must be application/json")
         return False
+
+    def _reject(self, code: int, message: str) -> bool:
+        """Drain any request body, then send an error. Returns True (guard responded).
+
+        Draining first matters for a rejected POST: closing the socket with an
+        unread body makes some clients (notably on Windows) see a connection reset
+        instead of our status code."""
+        self._drain_body()
+        self._json({"message": message}, code=code)
+        return True
+
+    def _drain_body(self) -> None:
+        try:
+            length = int(self.headers.get("Content-Length", 0) or 0)
+        except ValueError:
+            length = 0
+        if length > 0:
+            try:
+                self.rfile.read(length)
+            except Exception:
+                pass
 
     def do_GET(self):
         if self._guard():
@@ -176,14 +211,19 @@ class UIHandler(BaseHTTPRequestHandler):
             self.wfile.write(body)
             return
 
-        if parsed.path == "/api/run":
-            return self._stream(urllib.parse.parse_qs(parsed.query))
-
         if parsed.path == "/api/scans":
             return self._list_scans(urllib.parse.parse_qs(parsed.query))
 
         if parsed.path == "/api/ai/status":
             return self._ai_status()
+
+        if parsed.path.startswith("/api/runs/"):
+            parts = parsed.path.rstrip("/")[len("/api/runs/"):].split("/")
+            if len(parts) == 2 and parts[1] == "events":
+                return self._run_events(parts[0])
+            self.send_response(404)
+            self.end_headers()
+            return
 
         if parsed.path.startswith("/api/scans/"):
             parts = parsed.path.rstrip("/")[len("/api/scans/"):].split("/")
@@ -218,10 +258,17 @@ class UIHandler(BaseHTTPRequestHandler):
     def do_POST(self):
         if self._guard(require_json=True):
             return
-        parsed = urllib.parse.urlparse(self.path)
+        try:
+            self._route_post(urllib.parse.urlparse(self.path))
+        except BadRequest as exc:
+            self._json({"message": str(exc)}, code=400)
+
+    def _route_post(self, parsed):
         path = parsed.path.rstrip("/")
         if path == "/api/scans":
             return self._create_scan()
+        if path == "/api/runs":
+            return self._create_run()
         if path == "/api/ask":
             return self._ask()
         if path == "/api/scan/branch":
@@ -247,19 +294,49 @@ class UIHandler(BaseHTTPRequestHandler):
             "created": time.monotonic(),
         }
         token = uuid.uuid4().hex
-        with _SCAN_JOBS_LOCK:
-            _prune_scan_jobs()
+        with _JOBS_LOCK:
+            _prune_jobs(_SCAN_JOBS)
             _SCAN_JOBS[token] = params
         self._json({"scan_id": token, "events_url": f"/api/scans/{token}/events"})
 
     def _scan_events(self, token):
         """Stream a scan that ``_create_scan`` registered under *token* (one-shot)."""
-        with _SCAN_JOBS_LOCK:
-            _prune_scan_jobs()
+        with _JOBS_LOCK:
+            _prune_jobs(_SCAN_JOBS)
             params = _SCAN_JOBS.pop(token, None)
         if params is None:
             return self._json({"message": "unknown or expired scan job"}, code=404)
         self._scan_stream(params)
+
+    def _create_run(self):
+        """Register a benchmark run from a JSON body; return its streaming token.
+
+        The benchmark runs on ``GET /api/runs/<token>/events``. Starting it requires
+        this POST (JSON, same-origin), so a cross-site GET cannot drive the load."""
+        body = self._read_json_body()
+        split = str(body.get("split", "all") or "all")
+        if split not in SPLITS:
+            split = "all"
+        params = {
+            "split": split,
+            "runs": _int_body(body, "runs", 10, 1, 100),
+            "budget": _int_body(body, "budget", 150, 10, 2000),
+            "created": time.monotonic(),
+        }
+        token = uuid.uuid4().hex
+        with _JOBS_LOCK:
+            _prune_jobs(_RUN_JOBS)
+            _RUN_JOBS[token] = params
+        self._json({"run_id": token, "events_url": f"/api/runs/{token}/events"})
+
+    def _run_events(self, token):
+        """Stream a benchmark that ``_create_run`` registered under *token* (one-shot)."""
+        with _JOBS_LOCK:
+            _prune_jobs(_RUN_JOBS)
+            params = _RUN_JOBS.pop(token, None)
+        if params is None:
+            return self._json({"message": "unknown or expired run job"}, code=404)
+        self._stream(params)
 
     def _pick_branch(self):
         """Resume a scan that is waiting for a branch choice (see ``_resolve_branch``)."""
@@ -285,9 +362,12 @@ class UIHandler(BaseHTTPRequestHandler):
         if length <= 0:
             return {}
         try:
-            return json.loads(self.rfile.read(length).decode("utf-8") or "{}")
+            data = json.loads(self.rfile.read(length).decode("utf-8") or "{}")
         except Exception:
             return {}
+        # A valid-but-non-object body (e.g. `[1,2]` or `"x"`) would make the
+        # handlers' `body.get(...)` raise; treat anything but an object as empty.
+        return data if isinstance(data, dict) else {}
 
     def _sse(self, event, data):
         payload = f"event: {event}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
@@ -672,10 +752,12 @@ class UIHandler(BaseHTTPRequestHandler):
                         "limited to the project folder; use a repository URL instead")
         return None
 
-    def _stream(self, qs):
-        split = qs.get("split", ["all"])[0]
-        runs = _int_param(qs, "runs", 10, 1, 100)
-        budget = _int_param(qs, "budget", 150, 10, 2000)
+    def _stream(self, params):
+        """Run the benchmark and stream it as SSE. *params* comes from ``_create_run``
+        (split/runs/budget already validated), never from a raw query string."""
+        split = params["split"]
+        runs = params["runs"]
+        budget = params["budget"]
         endpoints = SPLITS.get(split, SPLITS["all"])()
 
         self.send_response(200)
