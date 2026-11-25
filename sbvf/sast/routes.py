@@ -79,6 +79,7 @@ def extract_routes(root: str) -> Dict[RouteKey, List[Route]]:
     routes: Dict[RouteKey, List[Route]] = {}
     _django_routes(trees, routes)
     _fastapi_routes(trees, routes)
+    _flask_routes(trees, routes)
     if js_sources:
         _js_routes(js_sources, routes)
     return routes
@@ -292,6 +293,66 @@ def _fastapi_routes(trees, routes):
                     _add(routes, (mod, fn.name), Route(
                         path=path, template=full, methods=methods, path_params=names,
                         framework="fastapi", source=f"{mod}.py:{d.lineno}"))
+
+
+# --- Flask --------------------------------------------------------------------
+
+def _flask_routes(trees, routes):
+    """@app.route('/x/<id>', methods=[...]) / @app.get('/x') / @bp.route(...),
+    with Blueprint(url_prefix=...) and register_blueprint(..., url_prefix=...)."""
+    bp_prefix: Dict[Tuple[str, str], str] = {}      # (module, var) -> Blueprint url_prefix
+    mounts: List[Tuple[str, str, str]] = []         # (prefix, module, var) from register
+
+    for mod, tree in trees.items():
+        imports = _import_map(tree, mod, trees)
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Assign) and len(node.targets) == 1 \
+                    and isinstance(node.targets[0], ast.Name) \
+                    and isinstance(node.value, ast.Call):
+                ctor = node.value.func
+                cname = ctor.attr if isinstance(ctor, ast.Attribute) else \
+                    ctor.id if isinstance(ctor, ast.Name) else ""
+                if cname == "Blueprint":
+                    bp_prefix[(mod, node.targets[0].id)] = \
+                        _const_str(_kw(node.value, "url_prefix")) or ""
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) \
+                    and node.func.attr == "register_blueprint" and node.args:
+                pfx = _const_str(_kw(node, "url_prefix")) or ""
+                a = node.args[0]
+                if isinstance(a, ast.Name):
+                    mounts.append((pfx, imports.get(a.id, mod), a.id))
+                elif isinstance(a, ast.Attribute) and isinstance(a.value, ast.Name):
+                    tm = imports.get(a.value.id) or _find_module(a.value.id, trees, mod)
+                    mounts.append((pfx, tm, a.attr))
+
+    for mod, tree in trees.items():
+        for fn in ast.walk(tree):
+            if not isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            for d in fn.decorator_list:
+                if not (isinstance(d, ast.Call) and isinstance(d.func, ast.Attribute)
+                        and isinstance(d.func.value, ast.Name)):
+                    continue
+                var, attr = d.func.value.id, d.func.attr
+                if attr == "route":
+                    m = _kw(d, "methods")
+                    methods = tuple(s.upper() for s in (
+                        _const_str(e) for e in getattr(m, "elts", [])) if s) or ("GET",)
+                elif attr in HTTP_VERBS:
+                    methods = (attr.upper(),)
+                else:
+                    continue
+                tmpl = _const_str(d.args[0]) if d.args else None
+                if tmpl is None:
+                    continue
+                own = bp_prefix.get((mod, var), "")
+                outer = [p for p, m2, v in mounts if m2 == mod and v == var] or [""]
+                for op in outer:
+                    full = (op + own + tmpl) or "/"
+                    path, names = _fill(full, _DJ_PARAM)       # Flask <int:id> == Django syntax
+                    _add(routes, (mod, fn.name), Route(
+                        path=path, template=full, methods=methods, path_params=names,
+                        framework="flask", source=f"{mod}.py:{d.lineno}"))
 
 
 # --- Express / NestJS -------------------------------------------------------------

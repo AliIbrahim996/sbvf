@@ -143,6 +143,37 @@ class TestDjango(unittest.TestCase):
         self.assertEqual(len(self.r["findings"]), 3)
 
 
+class TestFlask(unittest.TestCase):
+    """Improvement 4.5: Flask framework support (sources, <converter:name> path
+    params) and route recovery so findings become dynamically confirmable."""
+
+    def setUp(self):
+        self.r = scan_path(os.path.join(SAMPLES, "python_flask"))
+
+    def test_framework_detected(self):
+        self.assertEqual(self.r["frameworks"]["python"], "flask")
+
+    def test_classes(self):
+        got = {v for v, _ in _vulns(self.r)}
+        self.assertSetEqual(got, {"sqli", "xss", "command_injection"})
+
+    def test_count_safe_route_clean(self):
+        # /safe uses a parameterized query -> only the 4 planted vulns are reported.
+        self.assertEqual(len(self.r["findings"]), 4)
+
+    def test_path_param_source(self):
+        # the <iid> URL segment is recovered as a PATH-method SQLi source.
+        got = {(f["vuln"], f["method"], f["param"]) for f in self.r["findings"]}
+        self.assertIn(("sqli", "PATH", "iid"), got)
+
+    def test_routes_make_findings_confirmable(self):
+        routes = extract_routes(os.path.join(SAMPLES, "python_flask"))
+        eps, _ = derive_endpoints(self.r["findings"], routes=routes)
+        paths = {(e.path, e.param, e.vuln) for e in eps}
+        self.assertIn(("/item/1", "iid", "sqli"), paths)     # path-segment route
+        self.assertIn(("/user", "name", "sqli"), paths)      # query route
+
+
 class TestAnalyzerUnits(unittest.TestCase):
     def test_php_prepared_statement_not_flagged(self):
         src = ("<?php $id=$_GET['id'];"

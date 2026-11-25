@@ -122,7 +122,7 @@ untrusted user input from sources to dangerous sinks, and reports findings with
 `file:line` precision. It never runs or contacts the application.
 
 Supported stacks: **PHP** (native, Yii, Laravel), **Python** (native, FastAPI,
-Django) and **Node.js** (native `http`, Express, NestJS — `.js`/`.ts`). Detected
+Django, Flask) and **Node.js** (native `http`, Express, NestJS — `.js`/`.ts`). Detected
 classes include SQL injection, XSS, command/code injection, file inclusion, path
 traversal, open redirect, SSRF and **IDOR / broken object-level access control**
 (each mapped to a CWE).

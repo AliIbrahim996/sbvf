@@ -130,6 +130,8 @@ def detect_frameworks(root: str, files: List[str]) -> Dict[str, str]:
                 fw = "django"
             elif re.search(r"from\s+fastapi|import\s+fastapi|APIRouter", sig):
                 fw = "fastapi"
+            elif re.search(r"from\s+flask\b|import\s+flask\b|\bFlask\s*\(|@\w+\.route\b", sig):
+                fw = "flask"
         result["python"] = fw
 
     # --- Node.js framework ---

@@ -59,7 +59,7 @@ INPUT_METHODS = {
 # PHP frameworks whose URL routing is file-based (path == file path).
 FILE_ROUTED_PHP = {"php-native"}
 # Frameworks whose routes sbvf.sast.routes can recover from routing code.
-ROUTED = {"django", "fastapi", "express", "nestjs"}
+ROUTED = {"django", "fastapi", "flask", "express", "nestjs"}
 
 # Route-template placeholders: <int:uid> / <uid> (Django), {uid} (FastAPI/Nest), :uid (Express).
 _PLACEHOLDER = re.compile(r"<(?:\w+:)?(\w+)>|\{(\w+)(?::[^}]*)?\}|:(\w+)")
