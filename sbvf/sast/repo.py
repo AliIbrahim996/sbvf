@@ -27,7 +27,14 @@ import shutil
 import stat
 import subprocess
 import tempfile
+import threading
 import urllib.parse
+
+# Clone size cap: a clone whose temp dir grows past this many megabytes is killed
+# and deleted, so a single huge (or runaway) repository can't fill the disk. This
+# bounds total on-disk size, which --depth 1 and the timeout alone do not. Set
+# SBVF_CLONE_MAX_MB=0 to disable the cap.
+CLONE_MAX_MB = int(os.environ.get("SBVF_CLONE_MAX_MB") or "1024")
 
 # host -> human name. Matched exactly (after stripping an optional "www.").
 ALLOWED_HOSTS = {"github.com": "GitHub", "gitlab.com": "GitLab",
@@ -179,6 +186,35 @@ def normalize_repo_url(text: str) -> str:
 _BRANCH_RE = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9._/-]*$")
 
 
+def _tree_size_over(path: str, cap_bytes: int) -> bool:
+    """True as soon as the files under *path* total more than *cap_bytes* (early-out)."""
+    total = 0
+    for root, _dirs, files in os.walk(path):   # os.walk does not follow dir symlinks
+        for name in files:
+            try:
+                total += os.path.getsize(os.path.join(root, name))
+            except OSError:
+                pass
+            if total > cap_bytes:
+                return True
+    return False
+
+
+def _watch_clone_size(proc, path: str, cap_bytes: int, flag: dict,
+                      stop: "threading.Event") -> None:
+    """Kill *proc* if its clone dir *path* grows past *cap_bytes*; set flag['over']."""
+    while not stop.wait(0.5):
+        if proc.poll() is not None:
+            return
+        if _tree_size_over(path, cap_bytes):
+            flag["over"] = True
+            try:
+                proc.kill()
+            except Exception:
+                pass
+            return
+
+
 def clone_repo(url: str, timeout: int = 300, all_branches: bool = False) -> str:
     """Shallow-clone an accepted repository URL into a new temp dir; return it.
 
@@ -210,27 +246,55 @@ def clone_repo(url: str, timeout: int = 300, all_branches: bool = False) -> str:
         cfg += ["-c", "credential.helper="]
     cmd = ["git", *cfg, "clone", "--depth", "1", branch_scope, "--no-tags",
            "--", clean, dest]
+    # Run under Popen (not subprocess.run) so a background watcher can kill the
+    # clone the moment it exceeds the size cap, instead of only bounding it by time.
     try:
-        subprocess.run(cmd, check=True, env=env, timeout=timeout,
-                       stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
-                       stderr=subprocess.PIPE, text=True)
+        proc = subprocess.Popen(cmd, env=env, stdin=subprocess.DEVNULL,
+                                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                text=True)
+    except FileNotFoundError:
+        remove_tree(dest)
+        raise RuntimeError("git is not installed or not on PATH")
+
+    cap_bytes = CLONE_MAX_MB * 1024 * 1024 if CLONE_MAX_MB > 0 else 0
+    oversize = {"over": False}
+    stop = threading.Event()
+    watcher = None
+    if cap_bytes:
+        watcher = threading.Thread(target=_watch_clone_size,
+                                   args=(proc, dest, cap_bytes, oversize, stop),
+                                   daemon=True)
+        watcher.start()
+    try:
+        _out, err = proc.communicate(timeout=timeout)
     except subprocess.TimeoutExpired:
+        proc.kill()
+        proc.communicate()
+        stop.set()                       # stop the watcher before deleting the dir
+        if watcher is not None:
+            watcher.join(timeout=2)
         remove_tree(dest)
         raise RuntimeError(f"cloning {clean} timed out after {timeout}s")
-    except subprocess.CalledProcessError as exc:
+    finally:
+        stop.set()
+        if watcher is not None:
+            watcher.join(timeout=2)
+
+    if oversize["over"]:
         remove_tree(dest)
-        lines = [ln for ln in (exc.stderr or "").splitlines() if ln.strip()]
+        raise RuntimeError(f"{clean} exceeds the {CLONE_MAX_MB} MB clone size limit "
+                           f"(raise or disable it with SBVF_CLONE_MAX_MB)")
+    if proc.returncode != 0:
+        remove_tree(dest)
+        lines = [ln for ln in (err or "").splitlines() if ln.strip()]
         detail = scrub_credentials(lines[-1].strip() if lines
-                                   else f"exit code {exc.returncode}")
+                                   else f"exit code {proc.returncode}")
         hint = ("Check that your git credential helper has access to it."
                 if use_creds else
                 "Is the repository public? For a private repo set "
                 "SBVF_GIT_USE_CREDENTIALS=1 (or add the host to SBVF_EXTRA_GIT_HOSTS) "
                 "to use your git credentials.")
         raise RuntimeError(f"could not clone {clean} ({detail}). {hint}")
-    except FileNotFoundError:
-        remove_tree(dest)
-        raise RuntimeError("git is not installed or not on PATH")
     return dest
 
 
