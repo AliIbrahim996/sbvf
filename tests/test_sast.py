@@ -1344,7 +1344,7 @@ class TestCryptoRulePrecision(unittest.TestCase):
     def test_i18n_message_values_not_flagged(self):
         # reported FP: Arabic/English UI strings in a message catalogue are prose,
         # not secrets -- both by value (whitespace) and by path (messages/ dir).
-        rel = "protected/messages/ar/kayishha_dealer_app.php"
+        rel = "protected/messages/ar/app_messages.php"
         for line in ("    'password' => 'إسم المستخدم أو كلمة السر غير صحيحة',",
                      "    'incorrect_password' => 'كلمة السر غير صحيحة',",
                      "    'password_should_be_strong' => 'يجب أن تحتوي كلمة السر على الأقل',"):
@@ -1361,8 +1361,8 @@ class TestCryptoRulePrecision(unittest.TestCase):
 
     def test_test_fixture_tokens_not_flagged(self):
         # reported FP: fake tokens in a test fixture file are not real secrets.
-        line = "    'c_device_token' => 'B5B4F7DE-8675-434E-AD47-ERED34533454',"
-        for rel in ("protected/tests/fixtures/x2_apitoken.php",
+        line = "    'c_device_token' => 'DEADBEEF-0000-4000-8000-FEEDFACE0000',"
+        for rel in ("protected/tests/fixtures/api_token.php",
                     "app/__tests__/auth.spec.js", "src/user.test.js"):
             self.assertNotIn("hardcoded_secret", self._vf(rel, line), rel)
         # but the same token in real application code is still flagged
