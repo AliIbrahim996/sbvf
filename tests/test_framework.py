@@ -17,7 +17,8 @@ from sbvf import fitness, stats                              # noqa: E402
 from sbvf.individual import GRAMMARS, Individual, crossover  # noqa: E402
 from sbvf.algorithms import ALGORITHMS                       # noqa: E402
 from sbvf.oracles import Oracle, Target                      # noqa: E402
-from sbvf.sast import scan_path, derive_endpoints, extract_routes  # noqa: E402
+from sbvf.sast import (                                       # noqa: E402
+    scan_path, derive_endpoints, extract_routes, confirm_findings, TargetUnreachable)
 import testbed.app as app                                    # noqa: E402
 import testbed.apps.authapp as authapp                        # noqa: E402
 
@@ -267,6 +268,82 @@ class TestSastToDynamicBridge(unittest.TestCase):
         self.assertEqual(eps, [])
         self.assertEqual(len(skipped), 1)
         self.assertIn("not dynamically confirmable", skipped[0]["reason"])
+
+
+import re                                                     # noqa: E402
+from http.server import BaseHTTPRequestHandler                # noqa: E402
+
+
+class _OrdersApp(BaseHTTPRequestHandler):
+    """Serves /orders/<id>/ with no auth and no ownership check (public IDOR),
+    matching the routes the idor_django SAST sample recovers."""
+    ORDERS = {"1": ("u1", "s-alice"), "2": ("u2", "FLAG-bob")}
+
+    def log_message(self, *a):
+        pass
+
+    def do_GET(self):
+        m = re.match(r"/orders/(\w+)/?$", self.path.split("?")[0])
+        body, code = b"<p>not found</p>", 404
+        if m and m.group(1) in self.ORDERS:
+            owner, secret = self.ORDERS[m.group(1)]
+            body, code = f"<p>owner={owner} secret={secret}</p>".encode(), 200
+        self.send_response(code)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.end_headers()
+        self.wfile.write(body)
+
+
+class TestLiveConfirmation(unittest.TestCase):
+    """The dashboard's live-confirm step: drive the search against a running app."""
+
+    SAMPLE = os.path.join(_ROOT, "testbed", "sast_samples", "idor_django")
+
+    @classmethod
+    def setUpClass(cls):
+        cls.srv = ThreadingHTTPServer(("127.0.0.1", 0), _OrdersApp)
+        threading.Thread(target=cls.srv.serve_forever, daemon=True).start()
+        time.sleep(0.2)
+        cls.base = f"http://127.0.0.1:{cls.srv.server_address[1]}"
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.srv.shutdown()
+        cls.srv.server_close()
+
+    def test_rejects_non_local_host(self):
+        with self.assertRaises(ValueError):
+            confirm_findings([], "http://example.com")
+
+    def test_unreachable_target_raises(self):
+        # Bind a port, free it, then point at it so the connection is refused.
+        s = ThreadingHTTPServer(("127.0.0.1", 0), _OrdersApp)
+        port = s.server_address[1]
+        s.server_close()
+        with self.assertRaises(TargetUnreachable):
+            confirm_findings([], f"http://127.0.0.1:{port}")
+
+    def test_idor_sample_confirmed_end_to_end(self):
+        res = scan_path(self.SAMPLE)
+        summary = confirm_findings(res["findings"], self.base,
+                                   routes=extract_routes(self.SAMPLE))
+        # One finding (the IDOR), confirmed by two probes (idor + missing_auth).
+        self.assertEqual(summary["findings"], 1)
+        self.assertEqual((summary["attempted"], summary["confirmed"]), (2, 2))
+        f = next(x for x in res["findings"] if x["vuln"] == "idor")
+        self.assertTrue(f["dynamic"]["confirmed"])
+        kinds = sorted({c["vuln"] for c in f["dynamic"]["checks"]})
+        self.assertEqual(kinds, ["idor", "missing_auth"])
+        # The id was enumerated in the URL path, reaching another owner's record.
+        idor = next(c for c in f["dynamic"]["checks"] if c["vuln"] == "idor")
+        self.assertEqual(idor["where"], "path")
+        self.assertEqual(idor["payload"], "2")
+
+    def test_code_level_finding_gets_no_confirmation(self):
+        # A weak-crypto finding has no HTTP signal, so confirmation leaves it alone.
+        res = scan_path(os.path.join(_ROOT, "testbed", "sast_samples", "crypto_py"))
+        confirm_findings(res["findings"], self.base)
+        self.assertTrue(all("dynamic" not in f for f in res["findings"]))
 
 
 if __name__ == "__main__":

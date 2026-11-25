@@ -1,7 +1,13 @@
 import type { Finding } from "./types";
 
 /** A single node in the "how the scanner reached it" path. */
-export type StepKind = "scan" | "source" | "file" | "handler" | "rule" | "sink" | "vuln";
+export type StepKind = "scan" | "source" | "file" | "handler" | "rule" | "sink" | "vuln" | "confirmed";
+
+const WHERE_PHRASE: Record<string, string> = {
+  query: "a query parameter",
+  path: "a URL path segment",
+  body: "a POST body field",
+};
 
 export interface PathStep {
   kind: StepKind;
@@ -99,5 +105,22 @@ export function buildDetectionPath(f: Finding): PathStep[] {
     detail: f.how_in || f.message || "The scanner records the vulnerability.",
     meta: `${f.cwe} · ${(f.severity || "").toUpperCase()}`,
   });
+
+  // If the finding was live-confirmed against a running app, the path gains a
+  // final node: the search actually sent requests and reproduced the issue.
+  if (f.dynamic?.confirmed && f.dynamic.checks.length) {
+    const c = f.dynamic.checks[0];
+    const site = WHERE_PHRASE[c.where] || "the input";
+    const anon = c.vuln === "missing_auth" ? " with no authentication" : "";
+    const evals = c.evals != null ? ` in ${c.evals} request${c.evals === 1 ? "" : "s"}` : "";
+    const payload = c.payload ? ` Winning payload: ${c.payload}` : "";
+    steps.push({
+      kind: "confirmed",
+      title: "Confirmed live",
+      detail: `The ${c.algorithm} search drove ${site} on ${c.method} ${c.path}${anon} ` +
+        `against the running app and reproduced it${evals} — not just a static match.${payload}`,
+      meta: `${c.method} ${c.path}`,
+    });
+  }
   return steps;
 }

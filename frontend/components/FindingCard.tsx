@@ -56,6 +56,14 @@ export function FindingCard({
           <span className="cwe">{f.cwe}</span>
         </span>
         <code className="floc">{f.location}</code>
+        {f.dynamic?.confirmed && (
+          <span className="dynbadge" title={f.dynamic.checks
+            .map((c) => `${c.vuln} reproduced on ${c.method} ${c.path}` +
+              (c.evals != null ? ` in ${c.evals} request(s)` : ""))
+            .join("\n")}>
+            Confirmed live
+          </span>
+        )}
         {rank && <span className="airisk" title={rank.reason}>Risk {Math.round(rank.risk_score)}</span>}
         {assessment && assessment.is_false_positive != null && (
           <span className={`aibadge ${fp ? "fp" : "tp"}`} title={assessment.rationale}>
