@@ -25,8 +25,8 @@ from sbvf import datasets                    # noqa: E402
 from sbvf.experiment import iter_runs, analyze, SPLITS  # noqa: E402
 from sbvf.sast import scan_path, extract_routes, confirm_findings, TargetUnreachable  # noqa: E402
 from sbvf.sast.repo import (                 # noqa: E402
-    allowed_hosts, RepoURLError, checkout_branch, clone_repo, is_repo_url,
-    list_branches, normalize_repo_url, remove_tree)
+    allowed_hosts, RepoURLError, checkout_branch, clone_repo, export_branch,
+    is_git_repo, is_repo_url, list_branches, normalize_repo_url, remove_tree)
 from sbvf import store                        # noqa: E402  (optional persistence)
 from testbed.launcher import start_all       # noqa: E402
 
@@ -352,8 +352,10 @@ class UIHandler(BaseHTTPRequestHandler):
             self._sse("scan_step", {"kind": step.kind, "text": step.text,
                                     "data": step.data})
 
-        clone_dir = None
+        clone_dir = None          # a clone to delete afterwards
+        export_dir = None         # a local-branch export to delete afterwards
         branch_label = ""
+        display_root = ""         # what to show as the report's root
         try:
             if custom and is_repo_url(custom):
                 try:
@@ -375,26 +377,36 @@ class UIHandler(BaseHTTPRequestHandler):
                     return
                 self._sse("scan_step", {"kind": "clone", "text":
                           "Clone complete (the clone is deleted afterwards)", "data": {}})
-                branch_label = self._resolve_branch(clone_dir, want_select, want_branch)
-                if branch_label is None:         # aborted; error already streamed
+                res = self._resolve_branch(clone_dir, want_select, want_branch, local=False)
+                if res is None:                  # aborted; error already streamed
                     return
-                target = clone_dir
+                branch_label, target, _ = res
+                display_root = url
             elif custom:
                 target = os.path.abspath(os.path.expanduser(custom))
                 error = self._local_target_error(target)
                 if error:
                     self._sse("scan_error", {"message": error})
                     return
+                display_root = custom
+                # A local git working tree can offer its branches too; the user's
+                # checkout is never switched (other branches are exported read-only).
+                if (want_select or want_branch) and is_git_repo(target):
+                    res = self._resolve_branch(target, want_select, want_branch, local=True)
+                    if res is None:
+                        return
+                    branch_label, target, export_dir = res
             else:
                 target = os.path.join(SAST_DIR, sample if sample in SAST_SAMPLES
                                       else "php_native")
 
             started = time.monotonic()
             result = scan_path(target, on_step=on_step)
-            if clone_dir:
-                result["root"] = f"{url} @ {branch_label}" if branch_label else url
-                if branch_label:
-                    result["branch"] = branch_label
+            if branch_label:
+                result["root"] = f"{display_root} @ {branch_label}"
+                result["branch"] = branch_label
+            elif clone_dir:
+                result["root"] = url
 
             # Optional live confirmation: drive the search against a running
             # instance of the app at a local base URL the user provides. This only
@@ -444,38 +456,57 @@ class UIHandler(BaseHTTPRequestHandler):
         finally:
             if clone_dir:
                 remove_tree(clone_dir)
+            if export_dir:
+                remove_tree(export_dir)
 
-    def _resolve_branch(self, clone_dir, want_select, want_branch):
-        """Decide which branch of *clone_dir* to scan and check it out.
+    def _resolve_branch(self, repo_dir, want_select, want_branch, local):
+        """Decide which branch of the git repo at *repo_dir* to scan.
 
-        Returns the branch name (``""`` for "the clone's default branch, no
-        prompt"), or ``None`` after streaming a ``scan_error`` so the caller stops.
-        With *want_branch* the branch is used directly; with *want_select* the
-        stream emits a ``branch_prompt`` and blocks until ``_pick_branch`` resumes
-        it (or the wait times out).
-        """
-        if want_branch:
+        Returns ``(branch_label, scan_target, cleanup_dir)`` or ``None`` after
+        streaming a ``scan_error`` so the caller stops. *branch_label* is ``""`` for
+        "the default branch, no prompt". For a **clone** (*local* False) the branch
+        is checked out in place and *scan_target* is *repo_dir*. For a **local**
+        working tree the user's checkout is never switched: the current branch scans
+        in place, any other branch is exported to a temp dir (returned as both
+        *scan_target* and *cleanup_dir* for the caller to delete)."""
+        def materialize(branch, is_current):
+            """Produce the scan target for *branch* and stream the start step.
+
+            *is_current* (local working tree on this branch) means scan in place."""
             try:
-                checkout_branch(clone_dir, want_branch)
+                if is_current:
+                    tgt, cleanup = repo_dir, None          # scan the working tree
+                elif local:
+                    tgt = export_branch(repo_dir, branch)  # non-destructive snapshot
+                    cleanup = tgt
+                else:
+                    checkout_branch(repo_dir, branch)      # we own the clone
+                    tgt, cleanup = repo_dir, None
             except (RepoURLError, RuntimeError) as exc:
                 self._sse("scan_error", {"message": str(exc)})
                 return None
-            self._sse("scan_step", {"kind": "clone", "data": {"branch": want_branch},
-                      "text": f"On branch '{want_branch}' - starting static analysis"})
-            return want_branch
+            verb = "On" if is_current else "Checked out"
+            self._sse("scan_step", {"kind": "clone", "data": {"branch": branch},
+                      "text": f"{verb} branch '{branch}' - starting static analysis"})
+            return branch, tgt, cleanup
+
+        if want_branch:
+            # Only a local checkout needs the current branch (to scan in place).
+            current = list_branches(repo_dir)[1] if local else ""
+            return materialize(want_branch, local and want_branch == current)
         if not want_select:                      # legacy / CLI: default branch
             self._sse("scan_step", {"kind": "clone", "data": {},
                       "text": "Starting static analysis ..."})
-            return ""
+            return "", repo_dir, None
 
-        branches, current = list_branches(clone_dir)
+        branches, current = list_branches(repo_dir)
         if len(branches) <= 1:                   # nothing to choose
             only = current or (branches[0] if branches else "")
             msg = (f"Branch '{only}' - starting static analysis" if only
                    else "Starting static analysis ...")
             self._sse("scan_step", {"kind": "clone", "data": {"branch": only},
                       "text": msg})
-            return only
+            return only, repo_dir, None
 
         token = uuid.uuid4().hex
         q: Queue = Queue()
@@ -494,14 +525,7 @@ class UIHandler(BaseHTTPRequestHandler):
             self._sse("scan_error", {"message": "Branch selection timed out - "
                       "please scan again and choose a branch."})
             return None
-        try:
-            checkout_branch(clone_dir, chosen)
-        except (RepoURLError, RuntimeError) as exc:
-            self._sse("scan_error", {"message": str(exc)})
-            return None
-        self._sse("scan_step", {"kind": "clone", "data": {"branch": chosen},
-                  "text": f"Checked out branch '{chosen}' - starting static analysis"})
-        return chosen
+        return materialize(chosen, local and chosen == current)
 
     def _local_target_error(self, target):
         """Return an error message if a local scan target is not acceptable."""

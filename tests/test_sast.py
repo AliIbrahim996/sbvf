@@ -548,6 +548,65 @@ class TestRepoURLs(unittest.TestCase):
         finally:
             remove_tree(base)
 
+    def test_local_git_branches_and_nondestructive_export(self):
+        import os, shutil, subprocess, tempfile
+        from sbvf.sast.repo import (is_git_repo, list_branches, export_branch,
+                                    remove_tree, RepoURLError)
+        if not shutil.which("git"):
+            self.skipTest("git not installed")
+        base = tempfile.mkdtemp(prefix="sbvf_localbr_")
+        src = os.path.join(base, "src")
+
+        def git(*args):
+            subprocess.run(["git", "-C", src, *args], check=True,
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        try:
+            os.makedirs(src)
+            subprocess.run(["git", "init", "-q", src], check=True)
+            git("config", "user.email", "t@t.t"); git("config", "user.name", "t")
+            git("symbolic-ref", "HEAD", "refs/heads/main")
+            with open(os.path.join(src, "a.py"), "w") as fh:
+                fh.write("x = 1\n")
+            git("add", "-A"); git("commit", "-q", "-m", "init")
+            git("checkout", "-q", "-b", "feature")
+            with open(os.path.join(src, "feature_only.py"), "w") as fh:
+                fh.write("y = 2\n")
+            git("add", "-A"); git("commit", "-q", "-m", "feat")
+            git("checkout", "-q", "main")
+
+            self.assertTrue(is_git_repo(src))
+            self.assertFalse(is_git_repo(base))                 # plain dir, not a repo
+            branches, current = list_branches(src)              # local heads, no clone
+            self.assertEqual(current, "main")
+            self.assertEqual(set(branches), {"main", "feature"})
+
+            exp = export_branch(src, "feature")
+            try:
+                self.assertTrue(os.path.isfile(os.path.join(exp, "feature_only.py")))
+                # the user's own working tree is untouched: still on main, no leak
+                self.assertFalse(os.path.isfile(os.path.join(src, "feature_only.py")))
+                head = open(os.path.join(src, ".git", "HEAD")).read().strip()
+                self.assertTrue(head.endswith("main"))
+            finally:
+                remove_tree(exp)
+            with self.assertRaises(RepoURLError):
+                export_branch(src, "--evil")
+        finally:
+            remove_tree(base)
+
+    def test_credentials_gating(self):
+        import os
+        from unittest import mock
+        from sbvf.sast.repo import _wants_credentials
+        selfhosted = "internal.test"          # a reserved, non-routable placeholder host
+        with mock.patch.dict(os.environ, {"SBVF_EXTRA_GIT_HOSTS": selfhosted},
+                             clear=False):
+            os.environ.pop("SBVF_GIT_USE_CREDENTIALS", None)
+            self.assertTrue(_wants_credentials(selfhosted))                # self-hosted
+            self.assertFalse(_wants_credentials("github.com"))             # public, no flag
+            os.environ["SBVF_GIT_USE_CREDENTIALS"] = "1"
+            self.assertTrue(_wants_credentials("github.com"))              # flag enables all
+
     @unittest.skipUnless(os.environ.get("SBVF_NET_TESTS"), "set SBVF_NET_TESTS=1 for network tests")
     def test_real_github_clone(self):
         from sbvf.sast.repo import clone_repo, remove_tree
