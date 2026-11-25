@@ -72,7 +72,9 @@ export default function ScanPage() {
     setPhase("live");
     setScanning(true);
     let qs = t ? `path=${encodeURIComponent(t)}` : `sample=${sample}`;
-    if (remote) qs += `&branch_select=1`;   // ask the backend to offer a branch list
+    // Offer a branch list for any repo URL or local git folder (the backend only
+    // prompts when the target is actually a git repo with more than one branch).
+    if (t) qs += `&branch_select=1`;
     if (confirmUrl.trim()) qs += `&confirm=${encodeURIComponent(confirmUrl.trim())}`;
     const es = new EventSource(`/api/scan?${qs}`);
     esRef.current = es;
