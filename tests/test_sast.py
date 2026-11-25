@@ -173,6 +173,79 @@ class TestAnalyzerUnits(unittest.TestCase):
         self.assertEqual([f for f in findings if f.vuln == "sqli"], [])
 
 
+class TestSanitizerClasses(unittest.TestCase):
+    """Improvement 4.1: a sanitizer neutralises only the vulnerability class it
+    addresses. An HTML escaper does not make a value SQL-safe, and vice versa."""
+
+    # --- PHP ----------------------------------------------------------------
+
+    def _php(self, src):
+        return PhpAnalyzer("php-native").analyze("x.php", src)
+
+    def test_php_htmlspecialchars_still_sqli(self):
+        # htmlspecialchars stops XSS, NOT SQL injection -> the query is injectable.
+        src = ("<?php $x = htmlspecialchars($_GET['a']);"
+               "mysqli_query($c, \"SELECT * FROM t WHERE a='\" . $x . \"'\");")
+        vulns = {f.vuln for f in self._php(src)}
+        self.assertIn("sqli", vulns)
+
+    def test_php_htmlspecialchars_no_xss(self):
+        # ... but echoing the HTML-escaped value is safe (no XSS false positive).
+        src = "<?php $x = htmlspecialchars($_GET['a']); echo $x;"
+        self.assertEqual([f for f in self._php(src) if f.vuln == "xss"], [])
+
+    def test_php_sql_escaper_does_not_stop_xss(self):
+        # mysqli_real_escape_string is a SQL escaper; echoing its result is XSS.
+        src = "<?php $x = mysqli_real_escape_string($c, $_GET['a']); echo $x;"
+        self.assertTrue(any(f.vuln == "xss" for f in self._php(src)))
+
+    def test_php_sql_escaper_stops_sqli(self):
+        src = ("<?php $x = mysqli_real_escape_string($c, $_GET['a']);"
+               "mysqli_query($c, \"SELECT * FROM t WHERE a='\" . $x . \"'\");")
+        self.assertEqual([f for f in self._php(src) if f.vuln == "sqli"], [])
+
+    def test_php_intval_clean_everywhere(self):
+        src = ("<?php $x = intval($_GET['a']);"
+               "mysqli_query($c, \"SELECT * FROM t WHERE a=\" . $x); echo $x;")
+        self.assertEqual(self._php(src), [])
+
+    def test_php_escapeshellarg_not_sqli_safe(self):
+        # shell escaping does not protect a SQL query.
+        src = ("<?php $x = escapeshellarg($_GET['a']);"
+               "mysqli_query($c, \"SELECT * FROM t WHERE a=\" . $x);")
+        self.assertTrue(any(f.vuln == "sqli" for f in self._php(src)))
+
+    # --- Python -------------------------------------------------------------
+
+    def test_py_html_escape_still_sqli(self):
+        src = ("import html\n"
+               "def v(request):\n"
+               "    x = html.escape(request.GET['q'])\n"
+               "    cur.execute('SELECT * FROM t WHERE a=' + x)\n")
+        vulns = {f.vuln for f in PythonAnalyzer("django").analyze("v.py", src)}
+        self.assertIn("sqli", vulns)
+
+    def test_py_html_escape_no_xss(self):
+        src = ("import html\n"
+               "def v(request):\n"
+               "    x = html.escape(request.GET['q'])\n"
+               "    return HttpResponse(x)\n")
+        findings = PythonAnalyzer("django").analyze("v.py", src)
+        self.assertEqual([f for f in findings if f.vuln == "xss"], [])
+
+    def test_py_shlex_quote_scoped_to_command(self):
+        import shlex  # noqa: F401 (documents the sanitizer under test)
+        # shlex.quote protects the shell call but not an HTML response.
+        src = ("import shlex\n"
+               "def v(request):\n"
+               "    x = shlex.quote(request.GET['q'])\n"
+               "    os.system('ls ' + x)\n"
+               "    return HttpResponse(x)\n")
+        vulns = {f.vuln for f in PythonAnalyzer("django").analyze("v.py", src)}
+        self.assertNotIn("command_injection", vulns)
+        self.assertIn("xss", vulns)
+
+
 class TestParamRecovery(unittest.TestCase):
     """The PHP analyzer records the request parameter + method behind each finding,
     both directly and through an intermediate variable."""

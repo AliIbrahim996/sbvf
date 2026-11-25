@@ -26,7 +26,7 @@ import ast
 import re
 from typing import Callable, List, Optional, Tuple
 
-from .model import Finding
+from .model import INJECTION_CLASSES, Finding
 
 
 # --- Source recognition -----------------------------------------------------
@@ -40,14 +40,33 @@ REQUEST_ATTRS = {
 # Base identifiers commonly bound to the incoming request object.
 REQUEST_BASES = {"request", "req", "self.request"}
 
-# Callables that *remove* taint (validation / encoding / casting).
-SANITIZERS = {
-    "int", "float", "bool", "escape", "quote", "clean", "mark_safe_off",
-    "escape_html", "json_dumps", "quote_plus", "escapeshellarg", "b64encode",
-    "shlex_quote",
+# Callables that remove taint, each tied to the vulnerability class(es) it
+# actually neutralises (improvement 4.1). A sanitizer makes its value safe only
+# for its classes, so html.escape(x) stops XSS but NOT SQL injection:
+# cursor.execute("... " + html.escape(x)) is still reported. Numeric casts and
+# content-free encoders (base64/percent/JSON) are safe across every injection
+# class (INJECTION_CLASSES) but never neutralise an access-control class (IDOR).
+# Keyed by the call's final name (e.g. "escape" for markupsafe.escape).
+SANITIZER_NAMES = {
+    # numeric cast / boolean / encoding -> safe for every injection sink
+    "int": INJECTION_CLASSES, "float": INJECTION_CLASSES, "bool": INJECTION_CLASSES,
+    "b64encode": INJECTION_CLASSES, "json_dumps": INJECTION_CLASSES,
+    "quote": INJECTION_CLASSES, "quote_plus": INJECTION_CLASSES,   # percent-encoding
+    "mark_safe_off": INJECTION_CLASSES, "sanitize": INJECTION_CLASSES,
+    # HTML/markup escaping -> XSS only
+    "escape": frozenset({"xss"}), "escape_html": frozenset({"xss"}),
+    "clean": frozenset({"xss"}),                                   # bleach.clean
+    # shell quoting -> command injection only
+    "escapeshellarg": frozenset({"command_injection"}),
+    "shlex_quote": frozenset({"command_injection"}),
 }
-# Attribute-style sanitizers matched by their final attribute name.
-SANITIZER_ATTRS = {"escape", "quote", "clean", "quote_plus", "sanitize"}
+# Fully-qualified sanitizers whose dotted name pins the class precisely.
+SANITIZER_FULL = {
+    "html.escape": frozenset({"xss"}), "markupsafe.escape": frozenset({"xss"}),
+    "cgi.escape": frozenset({"xss"}), "bleach.clean": frozenset({"xss"}),
+    "shlex.quote": frozenset({"command_injection"}),
+    "urllib.parse.quote": INJECTION_CLASSES,                       # percent-encoding
+}
 
 # Standard-library http.server: inside a *RequestHandler subclass these `self`
 # attributes carry the raw request (path + query string, headers, body).
@@ -142,6 +161,7 @@ class _FuncScope:
         self.http_handler = http_handler   # method of an http.server RequestHandler
         self.guarded = False               # handler has an ownership/authz check (IDOR)
         self.tainted = {}   # var name -> human-readable source description
+        self.sanitized = {} # var name -> frozenset of classes it is already safe for
         self.origin = {}    # var name -> (request param, input method)
 
     # --- request-parameter recovery (for the SAST-guided dynamic search) ----
@@ -219,87 +239,129 @@ class _FuncScope:
                 return f"{base}.{node.attr}"
         return None
 
-    def is_sanitized(self, node) -> bool:
-        """True if *node* is a call to a known sanitizer/validator."""
+    def sanitizer_classes(self, node) -> Optional[frozenset]:
+        """The classes a sanitizer call neutralises, or None if *node* is not a
+        known sanitizer."""
         if isinstance(node, ast.Call):
             fname = _name_of(node.func)
+            if fname in SANITIZER_FULL:
+                return SANITIZER_FULL[fname]
             last = fname.split(".")[-1]
-            if last in SANITIZERS or last in SANITIZER_ATTRS:
-                return True
-            if fname in ("html.escape", "markupsafe.escape", "shlex.quote",
-                         "urllib.parse.quote", "bleach.clean", "cgi.escape"):
-                return True
-        return False
+            if last in SANITIZER_NAMES:
+                return SANITIZER_NAMES[last]
+        return None
 
-    def taint_of(self, node) -> Optional[str]:
-        """Return a source description if *node* evaluates to tainted data."""
+    def _taint_children(self, node) -> list:
+        """The sub-expressions through which taint propagates for *node* (the same
+        structure taint_of and taint_san both walk)."""
+        if isinstance(node, ast.BinOp) and isinstance(node.op, (ast.Add, ast.Mod)):
+            return [node.left, node.right]
+        if isinstance(node, ast.JoinedStr):           # f"...{x}..."
+            return [v.value for v in node.values if isinstance(v, ast.FormattedValue)]
+        if isinstance(node, ast.Call):
+            # A call's result carries the taint of its receiver or any argument
+            # ("...".format(x), x.split('?'), unquote(x), dict(gen), helper(x) ...),
+            # except for NON_PROPAGATING calls (sanitizers are handled separately).
+            if _name_of(node.func).split(".")[-1] in NON_PROPAGATING:
+                return []
+            out = []
+            if isinstance(node.func, ast.Attribute):
+                out.append(node.func.value)
+            for a in list(node.args) + [k.value for k in node.keywords]:
+                out.append(a.value if isinstance(a, ast.Starred) else a)
+            return out
+        if isinstance(node, ast.Lambda):              # re.sub(..., lambda m: x, ...)
+            return [node.body]
+        if isinstance(node, (ast.ListComp, ast.SetComp, ast.GeneratorExp, ast.DictComp)):
+            parts = [node.key, node.value] if isinstance(node, ast.DictComp) else [node.elt]
+            return parts + [g.iter for g in node.generators]
+        if isinstance(node, ast.Dict):
+            return [v for v in node.values if v is not None]
+        if isinstance(node, ast.Starred):
+            return [node.value]
+        if isinstance(node, ast.Subscript):           # tainted[...] , dict.get handled above
+            return [node.value]
+        if isinstance(node, ast.Attribute):           # tainted.attr
+            return [node.value]
+        if isinstance(node, ast.Await):
+            return [node.value]
+        if isinstance(node, (ast.List, ast.Tuple, ast.Set)):
+            return list(node.elts)
+        if isinstance(node, ast.IfExp):
+            return [node.body, node.orelse]
+        return []
+
+    def taint_of(self, node, vuln: Optional[str] = None) -> Optional[str]:
+        """Return a source description if *node* carries taint that is NOT
+        sanitized for vulnerability class *vuln* (improvement 4.1).
+
+        With *vuln* None, any sanitizer suppresses the taint (the pre-4.1
+        behaviour, kept for the access-control sinks a content sanitizer does not
+        address, e.g. IDOR)."""
         if node is None:
             return None
-        if self.is_sanitized(node):
-            return None
+        sc = self.sanitizer_classes(node)
+        if sc is not None:
+            if vuln is None or vuln in sc:
+                return None
+            # Sanitized for another class only: taint still flows for *vuln*
+            # through the wrapped argument(s) -> fall through to the children.
         direct = self.is_source_expr(node)
         if direct:
             return direct
         if isinstance(node, ast.Name):
-            return self.tainted.get(node.id)
+            src = self.tainted.get(node.id)
+            if src is None:
+                return None
+            if vuln is not None and vuln in self.sanitized.get(node.id, frozenset()):
+                return None
+            return src
         if isinstance(node, ast.Constant):
             return None
-        if isinstance(node, ast.BinOp) and isinstance(node.op, (ast.Add, ast.Mod)):
-            return self.taint_of(node.left) or self.taint_of(node.right)
-        if isinstance(node, ast.JoinedStr):           # f"...{x}..."
-            for v in node.values:
-                if isinstance(v, ast.FormattedValue):
-                    t = self.taint_of(v.value)
-                    if t:
-                        return t
-            return None
-        if isinstance(node, ast.Call):
-            # A call's result carries the taint of its receiver or any argument
-            # ("...".format(x), x.split('?'), unquote(x), dict(gen), helper(x) ...),
-            # except for sanitizers (handled above) and NON_PROPAGATING calls.
-            if _name_of(node.func).split(".")[-1] in NON_PROPAGATING:
-                return None
-            if isinstance(node.func, ast.Attribute):
-                t = self.taint_of(node.func.value)
-                if t:
-                    return t
-            for a in list(node.args) + [k.value for k in node.keywords]:
-                t = self.taint_of(a.value if isinstance(a, ast.Starred) else a)
-                if t:
-                    return t
-            return None
-        if isinstance(node, ast.Lambda):              # re.sub(..., lambda m: x, ...)
-            return self.taint_of(node.body)
-        if isinstance(node, (ast.ListComp, ast.SetComp, ast.GeneratorExp, ast.DictComp)):
-            parts = [node.key, node.value] if isinstance(node, ast.DictComp) else [node.elt]
-            parts += [g.iter for g in node.generators]
-            for p in parts:
-                t = self.taint_of(p)
-                if t:
-                    return t
-            return None
-        if isinstance(node, ast.Dict):
-            for v in node.values:
-                t = self.taint_of(v)
-                if t:
-                    return t
-            return None
-        if isinstance(node, ast.Starred):
-            return self.taint_of(node.value)
-        if isinstance(node, ast.Subscript):           # tainted[...] , dict.get handled above
-            return self.taint_of(node.value)
-        if isinstance(node, ast.Attribute):           # tainted.attr
-            return self.taint_of(node.value)
-        if isinstance(node, ast.Await):
-            return self.taint_of(node.value)
-        if isinstance(node, (ast.List, ast.Tuple, ast.Set)):
-            for e in node.elts:
-                t = self.taint_of(e)
-                if t:
-                    return t
-        if isinstance(node, ast.IfExp):
-            return self.taint_of(node.body) or self.taint_of(node.orelse)
+        for child in self._taint_children(node):
+            t = self.taint_of(child, vuln)
+            if t:
+                return t
         return None
+
+    def taint_san(self, node) -> Tuple[Optional[str], frozenset]:
+        """For a value expression during propagation, return (source description,
+        classes it is safe for). A value neutralised for every injection class is
+        treated as clean (returns (None, ...)) so it never taints the target."""
+        if node is None:
+            return None, frozenset()
+        sc = self.sanitizer_classes(node)
+        if sc is not None:
+            if INJECTION_CLASSES <= sc:
+                return None, frozenset()           # universal sanitizer -> clean
+            src, inner = self._children_taint_san(node)
+            if src is None:
+                return None, frozenset()
+            return src, inner | sc                 # safe for this class downstream
+        direct = self.is_source_expr(node)
+        if direct:
+            return direct, frozenset()
+        if isinstance(node, ast.Name):
+            return self.tainted.get(node.id), self.sanitized.get(node.id, frozenset())
+        if isinstance(node, ast.Constant):
+            return None, frozenset()
+        return self._children_taint_san(node)
+
+    def _children_taint_san(self, node) -> Tuple[Optional[str], frozenset]:
+        """Combine taint/san across a composite node's tainted children: the
+        source is the first tainted child's; a class is safe only if *every*
+        tainted part is safe for it (intersection)."""
+        found = []
+        for child in self._taint_children(node):
+            s, sn = self.taint_san(child)
+            if s is not None:
+                found.append((s, sn))
+        if not found:
+            return None, frozenset()
+        san = set(found[0][1])
+        for _, sn in found[1:]:
+            san &= sn
+        return found[0][0], frozenset(san)
 
 
 class PythonAnalyzer:
@@ -485,13 +547,14 @@ class PythonAnalyzer:
             changed = False
             guard += 1
             for targets, value in assigns:
-                src = scope.taint_of(value)
+                src, san = scope.taint_san(value)
                 if not src:
                     continue
                 for t in targets:
                     for name in self._target_names(t):
                         if name not in scope.tainted:
                             scope.tainted[name] = src
+                            scope.sanitized[name] = san
                             changed = True
                             if self._on_source:
                                 self._on_source(src, getattr(value, "lineno", 0))
@@ -538,17 +601,17 @@ class PythonAnalyzer:
         last = fname.split(".")[-1]
         pos = node.args
 
-        def first_tainted(args):
+        def first_tainted(args, vuln):
             for a in args:
-                t = scope.taint_of(a)
+                t = scope.taint_of(a, vuln)
                 if t:
                     return t
             return None
 
-        def dyn_tainted(args):
+        def dyn_tainted(args, vuln):
             """Tainted AND dynamically built (not a bare constant) -> injectable."""
             for a in args:
-                t = scope.taint_of(a)
+                t = scope.taint_of(a, vuln)
                 if t and not isinstance(a, ast.Constant):
                     return t
             return None
@@ -556,21 +619,21 @@ class PythonAnalyzer:
         # SQL injection
         if last in ("execute", "executemany", "executescript", "raw", "extra",
                     "annotate_raw") or fname in ("connection.execute",):
-            src = dyn_tainted(pos[:1])
+            src = dyn_tainted(pos[:1], "sqli")
             if src:
                 return self._emit(findings, "sqli", node, fname, src, scope)
         if last == "RawSQL" or fname.endswith("RawSQL"):
-            src = dyn_tainted(pos[:1])
+            src = dyn_tainted(pos[:1], "sqli")
             if src:
                 return self._emit(findings, "sqli", node, fname, src, scope)
         if last == "text":   # sqlalchemy text()
-            src = dyn_tainted(pos[:1])
+            src = dyn_tainted(pos[:1], "sqli")
             if src:
                 return self._emit(findings, "sqli", node, fname, src, scope)
 
         # OS command injection
         if fname in ("os.system", "os.popen") or last in ("getoutput", "getstatusoutput"):
-            src = first_tainted(pos[:1])
+            src = first_tainted(pos[:1], "command_injection")
             if src:
                 return self._emit(findings, "command_injection", node, fname, src, scope)
         if last in ("call", "run", "Popen", "check_output", "check_call") and \
@@ -578,7 +641,7 @@ class PythonAnalyzer:
             shell_true = any(isinstance(k.value, ast.Constant) and k.value.value is True
                              for k in node.keywords if k.arg == "shell")
             if shell_true:
-                src = first_tainted(pos)
+                src = first_tainted(pos, "command_injection")
                 if src:
                     return self._emit(findings, "command_injection", node, fname, src, scope)
 
@@ -594,52 +657,54 @@ class PythonAnalyzer:
                 or last in ("filter_by",)
                 or (last == "get" and recv.endswith(".query")))
             if orm_fetch and not self._call_owner_scoped(node):
-                src = first_tainted(list(node.args) + [k.value for k in node.keywords])
+                # A content sanitizer (even int()) does not make an id non-IDOR,
+                # so this access-control sink keeps the pre-4.1 semantics.
+                src = first_tainted(list(node.args) + [k.value for k in node.keywords], None)
                 if src:
                     return self._emit(findings, "idor", node, fname, src, scope)
 
         # Code injection
         if fname in ("eval", "exec") or last in ("eval", "exec"):
-            src = first_tainted(pos[:1])
+            src = first_tainted(pos[:1], "code_injection")
             if src:
                 return self._emit(findings, "code_injection", node, fname, src, scope)
         if fname in ("pickle.loads", "yaml.load", "cPickle.loads"):
-            src = first_tainted(pos[:1])
+            src = first_tainted(pos[:1], "code_injection")
             if src:
                 return self._emit(findings, "code_injection", node, fname, src, scope)
 
         # XSS / HTML response
         if last in ("HttpResponse", "HttpResponseBadRequest", "HTMLResponse",
                     "mark_safe", "Markup", "format_html"):
-            src = first_tainted(pos[:1])
+            src = first_tainted(pos[:1], "xss")
             if src:
                 return self._emit(findings, "xss", node, fname, src, scope)
 
         # http.server handlers: the response body and the Location header
         if scope.http_handler and fname == "self.wfile.write":
-            src = first_tainted(pos[:1])
+            src = first_tainted(pos[:1], "xss")
             if src:
                 return self._emit(findings, "xss", node, fname, src, scope)
         if scope.http_handler and fname == "self.send_header" and len(pos) >= 2 \
                 and isinstance(pos[0], ast.Constant) \
                 and str(pos[0].value).lower() == "location":
-            src = first_tainted(pos[1:2])
+            src = first_tainted(pos[1:2], "open_redirect")
             if src:
                 return self._emit(findings, "open_redirect", node, fname, src, scope)
 
         # Open redirect
         if last in ("redirect", "HttpResponseRedirect", "RedirectResponse"):
-            src = first_tainted(pos[:1])
+            src = first_tainted(pos[:1], "open_redirect")
             if src:
                 return self._emit(findings, "open_redirect", node, fname, src, scope)
 
         # Path traversal / file ops
         if fname == "open" or last in ("send_file", "send_from_directory"):
-            src = first_tainted(pos[:1])
+            src = first_tainted(pos[:1], "path_traversal")
             if src:
                 return self._emit(findings, "path_traversal", node, fname, src, scope)
         if fname in ("os.remove", "os.unlink"):
-            src = first_tainted(pos[:1])
+            src = first_tainted(pos[:1], "path_traversal")
             if src:
                 return self._emit(findings, "path_traversal", node, fname, src, scope)
 
@@ -647,7 +712,7 @@ class PythonAnalyzer:
         if fname in ("requests.get", "requests.post", "requests.put", "requests.delete",
                      "urllib.request.urlopen", "httpx.get", "httpx.post") or \
                 (last == "urlopen"):
-            src = first_tainted(pos[:1])
+            src = first_tainted(pos[:1], "ssrf")
             if src:
                 return self._emit(findings, "ssrf", node, fname, src, scope)
 
