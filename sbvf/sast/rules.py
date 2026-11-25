@@ -439,12 +439,25 @@ def scan_text(rel: str, source: str, framework: str = "",
             m = rule.match(lang, line)
             if not m:
                 continue
+            matched = m.group(0).strip()
+            code = line.strip()
+            # Never store or surface the actual credential: for a hardcoded-secret
+            # finding, redact the matched literal value everywhere it would appear
+            # (code line, sink, and the "how it got in" narrative). The detection
+            # already ran on the real value in rule.match above. Invariant: every
+            # hardcoded_secret pattern must expose the value as a (?P<val>...) group
+            # (see _LITERAL) so there is something to redact here.
+            if rule.vuln == "hardcoded_secret":
+                val = m.groupdict().get("val")
+                if val:
+                    matched = matched.replace(val, "***")
+                    code = code.replace(val, "***")
             out.append(Finding(
-                vuln=rule.vuln, file=rel, line=ln, sink=m.group(0).strip()[:80],
+                vuln=rule.vuln, file=rel, line=ln, sink=matched[:80],
                 source=f"pattern rule {rule.id}", framework=framework,
-                code=line.strip()[:200], message=rule.message, column=m.start() + 1,
+                code=code[:200], message=rule.message, column=m.start() + 1,
                 method="", rule=rule.id,
-                how=f"Rule {rule.id} matched `{m.group(0).strip()[:80]}` at "
+                how=f"Rule {rule.id} matched `{matched[:80]}` at "
                     f"{rel}:{ln}. {rule.message}"))
     return out
 

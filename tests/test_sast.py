@@ -1812,5 +1812,35 @@ class TestSupplyChain(unittest.TestCase):
                 [f for f in r["findings"] if f["vuln"] in a03], name)
 
 
+class TestSecretMasking(unittest.TestCase):
+    """A hardcoded-secret finding must never carry the real credential value."""
+
+    def _secret_finding(self, source, rel="config.py", framework="python-native"):
+        from sbvf.sast.rules import scan_text
+        fs = [f for f in scan_text(rel, source, framework)
+              if f.vuln == "hardcoded_secret"]
+        self.assertTrue(fs, "expected a hardcoded_secret finding")
+        return fs[0]
+
+    def test_secret_value_is_redacted_everywhere(self):
+        secret = "s3cr3t-live-value-123456"
+        f = self._secret_finding(f'API_KEY = "{secret}"\n')
+        # The real value must not appear in code, sink, how, or the serialized dict.
+        self.assertNotIn(secret, f.code)
+        self.assertNotIn(secret, f.sink)
+        self.assertNotIn(secret, f.how)
+        self.assertNotIn(secret, str(f.to_dict()))
+        self.assertIn("***", f.code)          # redaction marker is present
+        self.assertIn("API_KEY", f.code)      # the identifier is kept for context
+
+    def test_php_define_secret_is_redacted(self):
+        secret = "php-hardcoded-token-98765"
+        f = self._secret_finding(
+            f"define('API_SECRET', '{secret}');\n", rel="cfg.php", framework="php-native")
+        self.assertNotIn(secret, f.code)
+        self.assertNotIn(secret, f.sink)
+        self.assertIn("***", f.code)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

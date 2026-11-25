@@ -209,5 +209,34 @@ class TestRunnerPersistence(unittest.TestCase):
         repository.delete_scan(scan_id)
 
 
+class TestSendCodeSwitch(unittest.TestCase):
+    """The offending code line is sent to the LLM only when SBVF_AI_SEND_CODE is on."""
+
+    def setUp(self):
+        self._orig = os.environ.pop("SBVF_AI_SEND_CODE", None)
+
+    def tearDown(self):
+        if self._orig is None:
+            os.environ.pop("SBVF_AI_SEND_CODE", None)
+        else:
+            os.environ["SBVF_AI_SEND_CODE"] = self._orig
+
+    def _brief(self):
+        from sbvf.agents.finders import _finding_brief
+        return _finding_brief({"title": "Hardcoded secret", "cwe": "CWE-798",
+                               "severity": "high", "location": "a.py:1",
+                               "source": "literal", "sink": "assignment",
+                               "code": 'API_KEY = "***"'})
+
+    def test_code_withheld_by_default(self):
+        self.assertNotIn("Offending line", self._brief())
+
+    def test_code_included_when_enabled(self):
+        os.environ["SBVF_AI_SEND_CODE"] = "1"
+        brief = self._brief()
+        self.assertIn("Offending line", brief)
+        self.assertIn('API_KEY = "***"', brief)
+
+
 if __name__ == "__main__":
     unittest.main()
