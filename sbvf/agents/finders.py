@@ -6,9 +6,20 @@ Results are normalised to known types so the caller/DB never sees surprises.
 """
 from __future__ import annotations
 
+import os
 from typing import Any, Dict, List
 
 from .base import Agent
+
+
+def _send_code() -> bool:
+    """Whether to include the offending source line in the prompt sent to the LLM.
+
+    Off by default (metadata only): the finding's title, CWE, location, taint
+    source/sink and narrative are sent, but the raw code snippet never leaves the
+    machine for the AI provider unless ``SBVF_AI_SEND_CODE`` is explicitly enabled."""
+    return os.environ.get("SBVF_AI_SEND_CODE", "").strip().lower() in (
+        "1", "true", "yes", "on")
 
 
 def _finding_brief(f: Dict[str, Any]) -> str:
@@ -25,7 +36,7 @@ def _finding_brief(f: Dict[str, Any]) -> str:
         lines.append(f"Request parameter: {f.get('param')} (via {f.get('method')})")
     if f.get("how_in"):
         lines.append(f"How it got in: {f.get('how_in')}")
-    if f.get("code"):
+    if f.get("code") and _send_code():
         lines.append(f"Offending line:\n{str(f.get('code')).strip()}")
     return "\n".join(lines)
 
