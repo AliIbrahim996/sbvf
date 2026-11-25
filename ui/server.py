@@ -463,14 +463,18 @@ class UIHandler(BaseHTTPRequestHandler):
             self._sse("scan_step", {"kind": "clone", "data": {"branch": want_branch},
                       "text": f"On branch '{want_branch}' - starting static analysis"})
             return want_branch
-        if not want_select:
-            return ""                            # legacy / CLI: default branch
+        if not want_select:                      # legacy / CLI: default branch
+            self._sse("scan_step", {"kind": "clone", "data": {},
+                      "text": "Starting static analysis ..."})
+            return ""
 
         branches, current = list_branches(clone_dir)
         if len(branches) <= 1:                   # nothing to choose
             only = current or (branches[0] if branches else "")
+            msg = (f"Branch '{only}' - starting static analysis" if only
+                   else "Starting static analysis ...")
             self._sse("scan_step", {"kind": "clone", "data": {"branch": only},
-                      "text": f"Branch '{only}' - starting static analysis"})
+                      "text": msg})
             return only
 
         token = uuid.uuid4().hex

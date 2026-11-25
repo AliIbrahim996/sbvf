@@ -47,6 +47,12 @@ class RepoURLError(ValueError):
     """The text is not an accepted remote-repository URL."""
 
 
+def _git_env() -> dict:
+    """Environment for running git non-interactively (no credential/SSH prompts)."""
+    return dict(os.environ, GIT_TERMINAL_PROMPT="0", GCM_INTERACTIVE="never",
+                GIT_ASKPASS="echo", SSH_ASKPASS="echo")
+
+
 def _extra_hosts() -> dict:
     """Self-hosted git hosts added via the ``SBVF_EXTRA_GIT_HOSTS`` env var.
 
@@ -141,8 +147,7 @@ def clone_repo(url: str, timeout: int = 300, all_branches: bool = False) -> str:
     """
     clean = normalize_repo_url(url)
     dest = tempfile.mkdtemp(prefix="sbvf_sast_")
-    env = dict(os.environ, GIT_TERMINAL_PROMPT="0", GCM_INTERACTIVE="never",
-               GIT_ASKPASS="echo", SSH_ASKPASS="echo")
+    env = _git_env()
     branch_scope = "--no-single-branch" if all_branches else "--single-branch"
     cmd = ["git",
            "-c", "protocol.allow=never", "-c", "protocol.https.allow=always",
@@ -170,9 +175,7 @@ def clone_repo(url: str, timeout: int = 300, all_branches: bool = False) -> str:
 
 def _git(clone_dir: str, *args: str, timeout: int = 60):
     """Run ``git -C clone_dir <args>`` non-interactively and return the result."""
-    env = dict(os.environ, GIT_TERMINAL_PROMPT="0", GCM_INTERACTIVE="never",
-               GIT_ASKPASS="echo", SSH_ASKPASS="echo")
-    return subprocess.run(["git", "-C", clone_dir, *args], check=True, env=env,
+    return subprocess.run(["git", "-C", clone_dir, *args], check=True, env=_git_env(),
                           timeout=timeout, stdin=subprocess.DEVNULL,
                           stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
 
