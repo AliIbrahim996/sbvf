@@ -1,5 +1,7 @@
 # SBVF — Search-Based Vulnerability Framework
 
+[![CI](https://github.com/AliIbrahim996/sbvf/actions/workflows/ci.yml/badge.svg)](https://github.com/AliIbrahim996/sbvf/actions/workflows/ci.yml)
+
 Master's research prototype: a **search-based** framework that compares a Genetic
 Algorithm (GA), Cuckoo Search (CS) and Random Search (RS) for detecting **XSS**,
 **SQL Injection** and **Clickjacking** vulnerabilities in local web applications.
