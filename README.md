@@ -39,6 +39,31 @@ The bundled apps are intentionally vulnerable and are for academic use only.
 - Optional: `selenium` for real-browser confirmation of XSS/Clickjacking.
 - Optional: Docker, to run the dashboard and the DVWA practice lab.
 
+## Installation (pip)
+
+The core scanner needs no install — run it straight from a checkout with
+`py -3.12 -m ...`. To install it as a package (and get the `sbvf-scan` /
+`sbvf-scan-repo` commands on your `PATH`):
+
+```bash
+pip install .                 # core scanner, standard library only
+pip install ".[store]"        # + PostgreSQL persistence (psycopg)
+pip install ".[ai]"           # + AI-agents providers (Anthropic, OpenAI)
+pip install ".[all]"          # everything
+```
+
+The optional extras match the opt-in layers: `store` is only needed when
+`DATABASE_URL` is configured, and `ai` only when an LLM provider is enabled (the
+local Ollama provider needs neither). Once installed:
+
+```bash
+sbvf-scan path/to/app --json report.json     # static scan of a source tree
+sbvf-scan-repo --help                         # full clone + dynamic-confirm run
+```
+
+The dashboard (`py -3.12 -m ui.server`) stays a checkout-run tool: it launches the
+bundled benchmark apps and serves the built frontend, so it expects the repo layout.
+
 ## Quick start
 
 Run the real-time dashboard (it starts the benchmark apps for you):

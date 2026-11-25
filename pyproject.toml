@@ -1,0 +1,61 @@
+[build-system]
+requires = ["setuptools>=77.0.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "sbvf"
+description = "Search-Based Vulnerability Framework: static taint analysis plus search-based dynamic confirmation for web applications."
+readme = "README.md"
+requires-python = ">=3.12"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "Ali Ibrahim" }]
+keywords = ["security", "sast", "taint-analysis", "vulnerability", "owasp", "appsec"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Security",
+    "Topic :: Software Development :: Quality Assurance",
+]
+# The core scanner (sbvf/sast/**) and the dashboard run on the standard library
+# alone, so the base install has no third-party dependencies. The persistence and
+# AI-agents layers are opt-in via the extras below.
+dependencies = []
+dynamic = ["version"]
+
+[project.optional-dependencies]
+# Persistence layer (sbvf/store/) — only needed when DATABASE_URL is configured.
+store = [
+    "psycopg[binary]>=3.2",
+    "psycopg_pool>=3.2",
+]
+# AI-agents layer (sbvf/agents/) — lazy-imported per configured provider. The
+# local Ollama provider uses the standard library alone and needs nothing here.
+ai = [
+    "anthropic>=0.40",
+    "openai>=1.50",
+]
+all = [
+    "psycopg[binary]>=3.2",
+    "psycopg_pool>=3.2",
+    "anthropic>=0.40",
+    "openai>=1.50",
+]
+
+[project.scripts]
+sbvf-scan = "sbvf.scan_code:main"
+sbvf-scan-repo = "sbvf.scan_repo:main"
+
+[project.urls]
+Homepage = "https://github.com/AliIbrahim996/sbvf"
+Repository = "https://github.com/AliIbrahim996/sbvf"
+Issues = "https://github.com/AliIbrahim996/sbvf/issues"
+
+[tool.setuptools.dynamic]
+version = { attr = "sbvf.__version__" }
+
+[tool.setuptools.packages.find]
+include = ["sbvf*"]
