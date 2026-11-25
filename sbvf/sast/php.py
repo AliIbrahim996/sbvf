@@ -7,8 +7,11 @@ and tracks tainted variables across assignments. A statement that pushes an
 unsanitized tainted value into a dangerous sink (SQL query, echo, shell command,
 include, eval) produces a :class:`Finding` at the statement's line.
 
-The analysis is flow-insensitive (once a ``$var`` is tainted it stays tainted)
-and intra-file; these limitations are noted in the thesis.
+Taint propagation is flow-insensitive (pass 1 over-approximates every variable
+that is ever tainted), but the sink pass is flow-sensitive for *killing* taint:
+a variable reassigned an unconditional clean value loses its taint for the
+statements that follow (improvement 4.4). The analysis remains intra-file; these
+limitations are noted in the thesis.
 """
 from __future__ import annotations
 
@@ -133,10 +136,12 @@ class PhpAnalyzer:
         statements = list(self._statements(source))
 
         # Pass 1: propagate taint through assignments (fixpoint over statements).
+        # Flow-insensitive over-approximation: it records every variable that is
+        # ever tainted, independent of statement order, which pass 2 then refines.
         changed, guard = True, 0
         while changed and guard < 20:
             changed, guard = False, guard + 1
-            for line, stmt in statements:
+            for line, _depth, stmt in statements:
                 # Match a real assignment ($var = ... or $var .= ...), but NOT a
                 # comparison: the (?!=) lookahead rejects == / === / etc. so a
                 # statement like `$x == $_GET['y'];` is not mistaken for `$x = ...`.
@@ -158,15 +163,66 @@ class PhpAnalyzer:
         self._guard_ranges = self._compute_guard_ranges(source)
         self._file_guarded = bool(_PHP_IDOR_GUARD.search(source))
 
-        # Pass 2: check every statement for sink usage of tainted data.
-        for line, stmt in statements:
-            self._check_stmt(line, stmt, tainted, findings)
+        # Pass 2: flow-sensitive sink check (improvement 4.4). Walk the statements
+        # in order with a *live* taint set seeded from pass 1; when a variable is
+        # reassigned a clean value it is killed for the statements that follow, so
+        # ``$x = $_GET['id']; $x = 5; mysqli_query($x);`` is no longer reported.
+        # A block ({ ... }) is entered with a copy and its taint is unioned back on
+        # exit, so a kill buried in a conditional/loop body does not leak out (no
+        # false negatives) while an unconditional reassignment does.
+        self._flow_check(statements, tainted, findings)
 
         # Blade raw-echo ({!! $x !!}) for Laravel template files.
         if rel_path.endswith(".blade.php"):
             self._check_blade(source, tainted, findings)
 
         return findings
+
+    def _flow_check(self, statements, tainted, findings):
+        """Ordered, block-scoped sink pass that kills taint on clean reassignment."""
+        live = dict(tainted)
+        live_san = dict(self._sanitized)
+        saved_san = self._sanitized
+        self._sanitized = live_san          # _taint_in / _taint_rhs read live now
+        stack = []                          # snapshots of (live, live_san) per open brace
+        cur_depth = 0
+        try:
+            for line, depth, stmt in statements:
+                while depth > cur_depth:    # entering a block: snapshot, keep working copy
+                    stack.append((dict(live), dict(live_san)))
+                    cur_depth += 1
+                while depth < cur_depth and stack:   # leaving: union gens back, drop kills
+                    parent, parent_san = stack.pop()
+                    parent.update(live)
+                    parent_san.update(live_san)
+                    live, live_san = parent, parent_san
+                    self._sanitized = live_san
+                    cur_depth -= 1
+                # sinks see the live state BEFORE this statement's own reassignment
+                self._check_stmt(line, stmt, live, findings)
+                self._apply_assign_live(stmt, live, live_san)
+            while stack:                    # close any unbalanced blocks
+                parent, parent_san = stack.pop()
+                parent.update(live)
+                parent_san.update(live_san)
+                live, live_san = parent, parent_san
+        finally:
+            self._sanitized = saved_san
+
+    def _apply_assign_live(self, stmt, live, live_san):
+        """Update the live taint set for an assignment statement: (re)taint the
+        target from a tainted RHS, or kill it on a clean plain assignment."""
+        m = re.match(r"\s*(\$\w+)\s*(\.)?=(?!=)\s*(.+)", stmt)
+        if not m:
+            return
+        var, concat, rhs = m.group(1), m.group(2), m.group(3)
+        src, san = self._taint_rhs(rhs, live)
+        if src:
+            live[var] = src
+            live_san[var] = san
+        elif not concat:            # $x = <clean>  -> taint-kill; $x .= <clean> appends, keep
+            live.pop(var, None)
+            live_san.pop(var, None)
 
     # --- IDOR guard scoping -------------------------------------------------
 
@@ -451,17 +507,21 @@ class PhpAnalyzer:
 
     # --- lexer: statement splitter -----------------------------------------
 
-    def _statements(self, src: str) -> List[Tuple[int, str]]:
-        """Yield (start_line, statement_text) tuples.
+    def _statements(self, src: str) -> List[Tuple[int, int, str]]:
+        """Yield (start_line, brace_depth, statement_text) tuples.
 
         Strips comments, respects single/double quotes and heredocs, treats
-        ``<?=`` as an echo, and splits on ``;`` ``{`` ``}`` and ``?>``.
-        """
-        out: List[Tuple[int, str]] = []
+        ``<?=`` as an echo, and splits on ``;`` ``{`` ``}`` and ``?>``. The
+        brace depth (0 at top level, +1 inside each ``{ }``) lets the
+        flow-sensitive pass tell an unconditional reassignment from one buried
+        in a conditional/loop body (improvement 4.4)."""
+        out: List[Tuple[int, int, str]] = []
         i, n = 0, len(src)
         line = 1
+        depth = 0            # current brace-nesting depth
         buf = []
         start_line = 1
+        start_depth = 0
         started = False      # True once the current statement has a non-space char
         in_php = False
 
@@ -469,16 +529,17 @@ class PhpAnalyzer:
             nonlocal started
             text = "".join(buf).strip()
             if text:
-                out.append((start_line, text))
+                out.append((start_line, start_depth, text))
             buf.clear()
             started = False
 
         def mark():
             # Anchor the statement's line to its first meaningful character,
             # so the number is not left on the previous statement's terminator.
-            nonlocal start_line, started
+            nonlocal start_line, start_depth, started
             if not started:
                 start_line = line
+                start_depth = depth
                 started = True
 
         while i < n:
@@ -562,7 +623,17 @@ class PhpAnalyzer:
                     line += chunk.count("\n")
                     i = stop
                     continue
-            if ch in ";{}":
+            if ch == "{":
+                flush()
+                depth += 1
+                i += 1
+                continue
+            if ch == "}":
+                flush()
+                depth = max(0, depth - 1)
+                i += 1
+                continue
+            if ch == ";":
                 flush()
                 i += 1
                 continue

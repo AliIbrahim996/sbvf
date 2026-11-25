@@ -246,6 +246,73 @@ class TestSanitizerClasses(unittest.TestCase):
         self.assertIn("xss", vulns)
 
 
+class TestTaintKillOnReassignment(unittest.TestCase):
+    """Improvement 4.4: a variable reassigned a clean value loses its taint for
+    the statements that follow, but an unconditional kill is required — a
+    reassignment buried in a conditional/loop body must not suppress the finding."""
+
+    def _php(self, src):
+        return PhpAnalyzer("php-native").analyze("x.php", src)
+
+    def _py(self, src):
+        return PythonAnalyzer("django").analyze("v.py", src)
+
+    # --- PHP ----------------------------------------------------------------
+
+    def test_php_clean_reassign_kills(self):
+        src = ("<?php $x = $_GET['id']; $x = 5;"
+               "mysqli_query($c, \"SELECT * FROM t WHERE id=\" . $x);")
+        self.assertEqual([f for f in self._php(src) if f.vuln == "sqli"], [])
+
+    def test_php_sink_before_reassign_still_flagged(self):
+        src = ("<?php $x = $_GET['id'];"
+               "mysqli_query($c, \"SELECT * FROM t WHERE id=\" . $x); $x = 5;")
+        self.assertTrue(any(f.vuln == "sqli" for f in self._php(src)))
+
+    def test_php_conditional_reassign_does_not_kill(self):
+        # The clean reassignment is inside an if, so $x may still be tainted.
+        src = ("<?php $x = $_GET['id']; if ($c) { $x = 5; }"
+               "mysqli_query($c, \"SELECT * FROM t WHERE id=\" . $x);")
+        self.assertTrue(any(f.vuln == "sqli" for f in self._php(src)))
+
+    def test_php_retaint_after_clean(self):
+        src = ("<?php $x = 'safe'; $x = $_GET['id'];"
+               "mysqli_query($c, \"SELECT * FROM t WHERE id=\" . $x);")
+        self.assertTrue(any(f.vuln == "sqli" for f in self._php(src)))
+
+    # --- Python -------------------------------------------------------------
+
+    def test_py_clean_reassign_kills(self):
+        src = ("def v(request):\n"
+               "    x = request.GET['q']\n"
+               "    x = '5'\n"
+               "    cur.execute('SELECT * FROM t WHERE a=' + x)\n")
+        self.assertEqual([f for f in self._py(src) if f.vuln == "sqli"], [])
+
+    def test_py_conditional_reassign_does_not_kill(self):
+        src = ("def v(request):\n"
+               "    x = request.GET['q']\n"
+               "    if cond:\n"
+               "        x = '5'\n"
+               "    cur.execute('SELECT * FROM t WHERE a=' + x)\n")
+        self.assertTrue(any(f.vuln == "sqli" for f in self._py(src)))
+
+    def test_py_sink_before_reassign_still_flagged(self):
+        src = ("def v(request):\n"
+               "    x = request.GET['q']\n"
+               "    cur.execute('SELECT * FROM t WHERE a=' + x)\n"
+               "    x = '5'\n")
+        self.assertTrue(any(f.vuln == "sqli" for f in self._py(src)))
+
+    def test_py_conditional_sink_sees_taint(self):
+        # a sink inside the conditional, on the tainted value, is still reported
+        src = ("def v(request):\n"
+               "    x = request.GET['q']\n"
+               "    if cond:\n"
+               "        cur.execute('SELECT * FROM t WHERE a=' + x)\n")
+        self.assertTrue(any(f.vuln == "sqli" for f in self._py(src)))
+
+
 class TestParamRecovery(unittest.TestCase):
     """The PHP analyzer records the request parameter + method behind each finding,
     both directly and through an intermediate variable."""
