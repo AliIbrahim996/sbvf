@@ -1,8 +1,8 @@
 """Tests for the SBVF dashboard server's request hardening (ui/server.py).
 
 Covers the Host/Origin/Content-Type guard, the POST-to-start / SSE-to-stream scan
-flow (a cross-site GET can no longer start a scan), bounded numeric parameters,
-and git-credential scrubbing.
+and benchmark flows (a cross-site GET can no longer start a scan or a benchmark),
+bounded numeric parameters, and git-credential scrubbing.
 
 Runnable with pytest or `python -m tests.test_ui_server`.
 """
@@ -160,15 +160,93 @@ class TestScanFlow(unittest.TestCase):
             self.assertEqual(status, 404)
 
 
+class TestRunFlow(unittest.TestCase):
+    def test_get_run_no_longer_starts_a_benchmark(self):
+        # The old GET /api/run start route is gone, so a forced cross-site GET
+        # (an <img>/<script> with a valid Host and no Origin) cannot drive the load.
+        with _Server() as s:
+            status, _ = s.request("GET", "/api/run?split=all&runs=5")
+            self.assertEqual(status, 404)
+
+    def test_post_run_creates_job(self):
+        with _Server() as s:
+            status, body = s.request(
+                "POST", "/api/runs",
+                headers={"Content-Type": "application/json"},
+                body=json.dumps({"split": "all", "runs": 3, "budget": 50}))
+            self.assertEqual(status, 200)
+            d = json.loads(body)
+            self.assertTrue(d["run_id"])
+            self.assertEqual(d["events_url"], f"/api/runs/{d['run_id']}/events")
+
+    def test_post_run_then_sse_streams_it(self):
+        # An empty split lets the benchmark complete offline (no target apps needed):
+        # _stream emits `start` then `done` with no per-run events in between.
+        server.SPLITS["_test_empty"] = lambda: []
+        try:
+            with _Server() as s:
+                _, body = s.request(
+                    "POST", "/api/runs",
+                    headers={"Content-Type": "application/json"},
+                    body=json.dumps({"split": "_test_empty"}))
+                token = json.loads(body)["run_id"]
+                status, stream = s.stream(f"/api/runs/{token}/events", until="event: done")
+                self.assertEqual(status, 200)
+                self.assertIn("event: start", stream)
+                self.assertIn("event: done", stream)
+        finally:
+            server.SPLITS.pop("_test_empty", None)
+
+    def test_unknown_run_token_is_404(self):
+        with _Server() as s:
+            status, _ = s.request("GET", "/api/runs/deadbeef/events")
+            self.assertEqual(status, 404)
+
+    def test_non_object_json_body_is_treated_as_empty(self):
+        # A valid-but-non-object body must not crash the handler; it falls back
+        # to defaults and still registers a job.
+        with _Server() as s:
+            status, body = s.request("POST", "/api/runs",
+                                     headers={"Content-Type": "application/json"},
+                                     body=json.dumps([1, 2, 3]))
+            self.assertEqual(status, 200)
+            self.assertTrue(json.loads(body)["run_id"])
+
+    def test_run_token_is_single_use(self):
+        server.SPLITS["_test_empty"] = lambda: []
+        try:
+            with _Server() as s:
+                _, body = s.request("POST", "/api/runs",
+                                    headers={"Content-Type": "application/json"},
+                                    body=json.dumps({"split": "_test_empty"}))
+                token = json.loads(body)["run_id"]
+                s.stream(f"/api/runs/{token}/events", until="event: done")   # consume
+                status, _ = s.request("GET", f"/api/runs/{token}/events")    # again
+                self.assertEqual(status, 404)
+        finally:
+            server.SPLITS.pop("_test_empty", None)
+
+
 class TestBoundedParams(unittest.TestCase):
     def test_non_integer_run_param_is_400(self):
         with _Server() as s:
-            status, _ = s.request("GET", "/api/run?runs=abc")
+            status, _ = s.request("POST", "/api/runs",
+                                  headers={"Content-Type": "application/json"},
+                                  body=json.dumps({"runs": "abc"}))
             self.assertEqual(status, 400)
 
     def test_out_of_range_run_param_is_400(self):
         with _Server() as s:
-            status, _ = s.request("GET", "/api/run?runs=99999")
+            status, _ = s.request("POST", "/api/runs",
+                                  headers={"Content-Type": "application/json"},
+                                  body=json.dumps({"runs": 99999}))
+            self.assertEqual(status, 400)
+
+    def test_out_of_range_budget_is_400(self):
+        with _Server() as s:
+            status, _ = s.request("POST", "/api/runs",
+                                  headers={"Content-Type": "application/json"},
+                                  body=json.dumps({"budget": 1}))
             self.assertEqual(status, 400)
 
 
