@@ -124,7 +124,8 @@ class PhpAnalyzer:
     # --- public -------------------------------------------------------------
 
     def analyze(self, rel_path: str, source: str,
-                on_source: Optional[Callable] = None) -> List[Finding]:
+                on_source: Optional[Callable] = None,
+                seed_params: Optional[List[str]] = None) -> List[Finding]:
         self._rel = rel_path
         self._lines = source.splitlines()
         self._on_source = on_source
@@ -132,8 +133,23 @@ class PhpAnalyzer:
         self._sanitized = {}    # "$var" -> frozenset of classes it is already safe for
         self._origin = {}       # "$var" -> (param, method) of its originating input
         findings: List[Finding] = []
+        if not hasattr(self, "_summaries"):
+            self._summaries = {}
 
         statements = list(self._statements(source))
+
+        if seed_params is None:
+            # Top-level file analysis: learn inter-procedural summaries first
+            # (improvement 4.2) so call sites below can use them.
+            self._summaries = {}
+            self._build_summaries(source)
+        else:
+            # Summary sub-analysis: treat every parameter as a symbolic source so
+            # we can see which ones reach a sink / flow to the return value.
+            for p in seed_params:
+                tainted[p] = f"parameter '{p}'"
+                self._sanitized[p] = frozenset()
+                self._origin[p] = (p, "PARAM")
 
         # Pass 1: propagate taint through assignments (fixpoint over statements).
         # Flow-insensitive over-approximation: it records every variable that is
@@ -172,11 +188,133 @@ class PhpAnalyzer:
         # false negatives) while an unconditional reassignment does.
         self._flow_check(statements, tainted, findings)
 
+        # For a summary sub-analysis, record whether the function returns a value
+        # tainted by a real input source (not merely one of its parameters).
+        if seed_params is not None:
+            self._returns_source = self._compute_returns_source(statements, tainted)
+
         # Blade raw-echo ({!! $x !!}) for Laravel template files.
         if rel_path.endswith(".blade.php"):
             self._check_blade(source, tainted, findings)
 
         return findings
+
+    # --- inter-procedural summaries (improvement 4.2) -----------------------
+
+    def _extract_functions(self, source: str):
+        """{name: (params, body_text)} for each user-defined PHP function."""
+        funcs = {}
+        for m in re.finditer(r"function\s+(\w+)\s*\(([^)]*)\)[^{;]*\{", source):
+            params = [pm.group(1) for pm in re.finditer(r"(\$\w+)", m.group(2))]
+            depth, i, n = 1, m.end(), len(source)      # m.end() is just past '{'
+            while i < n and depth:
+                c = source[i]
+                if c == "{":
+                    depth += 1
+                elif c == "}":
+                    depth -= 1
+                i += 1
+            body = source[m.end():i - 1] if depth == 0 else source[m.end():i]
+            funcs[m.group(1)] = (params, body)
+        return funcs
+
+    def _build_summaries(self, source: str):
+        """Fixpoint over every function: record returns_source (hands back user
+        input) and sink_params (a parameter reaches a sink). Iterated so one
+        helper calling another converges."""
+        funcs = self._extract_functions(source)
+        for name, (params, _body) in funcs.items():
+            self._summaries[name] = {"params": params, "returns_source": False,
+                                     "sink_params": set()}
+        for _ in range(8):
+            changed = False
+            for name, (params, body) in funcs.items():
+                rs, sp = self._summarize_func(params, body)
+                cur = self._summaries[name]
+                if rs != cur["returns_source"] or sp != cur["sink_params"]:
+                    cur["returns_source"], cur["sink_params"] = rs, sp
+                    changed = True
+            if not changed:
+                break
+
+    def _summarize_func(self, params, body):
+        """Analyze a function body with its parameters seeded as taint, using the
+        shared summaries for any helper it calls."""
+        sub = PhpAnalyzer(self.framework)
+        sub._summaries = self._summaries               # share for transitive calls
+        found = sub.analyze("<summary>", "<?php\n" + body, seed_params=params)
+        pset = set(params)
+        sink_params = {(f.param, f.vuln) for f in found
+                       if f.method == "PARAM" and f.param in pset}
+        return getattr(sub, "_returns_source", False), sink_params
+
+    def _compute_returns_source(self, statements, tainted) -> bool:
+        for _line, _depth, stmt in statements:
+            rm = re.match(r"return\b\s*(.+)", stmt)
+            if not rm:
+                continue
+            expr = rm.group(1)
+            if self._taint_in(expr, tainted, None) and self._endpoint_for(expr)[1] != "PARAM":
+                return True
+        return False
+
+    def _call_returns_source(self, text: str) -> Optional[str]:
+        """Source description if *text* calls a local helper that returns user
+        input (improvement 4.2)."""
+        for m in re.finditer(r"(?<![\w>$:])(\w+)\s*\(", text):
+            s = getattr(self, "_summaries", {}).get(m.group(1))
+            if s and s["returns_source"]:
+                return f"user input (returned by {m.group(1)}())"
+        return None
+
+    @staticmethod
+    def _split_args(s: str):
+        """Split a call's argument list on top-level commas (quote/paren aware)."""
+        args, depth, buf, quote = [], 0, [], None
+        for ch in s:
+            if quote:
+                buf.append(ch)
+                if ch == quote:
+                    quote = None
+                continue
+            if ch in "'\"":
+                quote = ch
+            elif ch in "([{":
+                depth += 1
+            elif ch in ")]}":
+                depth -= 1
+            elif ch == "," and depth == 0:
+                args.append("".join(buf).strip())
+                buf = []
+                continue
+            buf.append(ch)
+        if "".join(buf).strip():
+            args.append("".join(buf).strip())
+        return args
+
+    def _check_helper_sinks(self, line, stmt, live, findings):
+        """4.2: a call to a local helper that funnels a parameter into a sink."""
+        if stmt.lstrip().startswith("function"):
+            return
+        for m in re.finditer(r"(?<![\w>$:])(\w+)\s*\(", stmt):
+            s = getattr(self, "_summaries", {}).get(m.group(1))
+            if not s or not s["sink_params"]:
+                continue
+            open_idx = stmt.find("(", m.start())
+            if open_idx == -1:
+                continue
+            args = self._split_args(self._arg_region(stmt, open_idx)[1:-1])
+            for pname, vuln in s["sink_params"]:
+                try:
+                    idx = s["params"].index(pname)
+                except ValueError:
+                    continue
+                if idx < len(args):
+                    src = self._taint_in(args[idx], live, vuln)
+                    if src:
+                        self._emit(findings, vuln, line,
+                                   f"{m.group(1)}() -> {vuln} sink", src, args[idx])
+                        return
 
     def _flow_check(self, statements, tainted, findings):
         """Ordered, block-scoped sink pass that kills taint on clean reassignment."""
@@ -322,7 +460,8 @@ class PhpAnalyzer:
                 base = self._sanitized.get(var, frozenset())
                 if not self._token_safe(text, var, base, vuln):
                     return desc
-        return None
+        # A call to a local helper that returns user input (improvement 4.2).
+        return self._call_returns_source(text)
 
     def _taint_rhs(self, rhs: str, tainted: dict) -> Tuple[Optional[str], frozenset]:
         """For an assignment RHS, return (source description, classes it is safe
@@ -340,6 +479,9 @@ class PhpAnalyzer:
                 if INJECTION_CLASSES <= san:
                     continue
                 return desc, san
+        cs = self._call_returns_source(rhs)            # 4.2: source-returning helper
+        if cs:
+            return cs, frozenset()
         return None, frozenset()
 
     def _source_token(self, text: str) -> str:
@@ -463,6 +605,10 @@ class PhpAnalyzer:
                 if src:
                     return self._emit(findings, "command_injection", line,
                                       "backticks", src, bt.group(1))
+
+        # Inter-procedural (4.2): a call to a local helper that funnels a tainted
+        # argument into an internal sink.
+        self._check_helper_sinks(line, stmt, tainted, findings)
 
     def _region_after(self, stmt, match):
         """Argument region for a call-style sink (balanced parens) or rest of line."""
