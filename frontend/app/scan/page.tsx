@@ -145,7 +145,7 @@ export default function ScanPage() {
             type="text"
             value={path}
             onChange={(e) => setPath(e.target.value)}
-            placeholder="C:\path\to\project   or   https://github.com/owner/repo (overrides sample)"
+            placeholder="/path/to/project  ·  C:\path\to\project  ·  https://github.com/owner/repo (overrides sample)"
           />
         </div>
         <div className="field" style={{ flex: 1, minWidth: 240 }}>

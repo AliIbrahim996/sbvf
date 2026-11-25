@@ -460,6 +460,28 @@ class TestRepoURLs(unittest.TestCase):
         self.assertFalse(is_repo_url(r"C:\projects\app"))
         self.assertFalse(is_repo_url("testbed/sast_samples/php_native"))
 
+    def test_self_hosted_gitlab_via_env(self):
+        import os
+        from unittest import mock
+        from sbvf.sast.repo import RepoURLError, normalize_repo_url, is_repo_url
+        host = "gitlab.corp.example.com"
+        # Rejected by default (no env var set).
+        with self.assertRaises(RepoURLError):
+            normalize_repo_url(f"https://{host}/group/repo")
+        # Accepted, GitLab-style (nested groups + "/-/" separator) once added.
+        with mock.patch.dict(os.environ, {"SBVF_EXTRA_GIT_HOSTS": f"other.test, {host}"}):
+            self.assertEqual(
+                normalize_repo_url(f"https://{host}/group/sub/repo/-/tree/main"),
+                f"https://{host}/group/sub/repo.git")
+            self.assertEqual(normalize_repo_url(f"{host}/g/p.git"),
+                             f"https://{host}/g/p.git")
+            self.assertTrue(is_repo_url(f"https://{host}/g/p"))
+            # http:// and credentials are still refused on the extra host.
+            with self.assertRaises(RepoURLError):
+                normalize_repo_url(f"http://{host}/g/p")
+            with self.assertRaises(RepoURLError):
+                normalize_repo_url(f"https://u:p@{host}/g/p")
+
     @unittest.skipUnless(os.environ.get("SBVF_NET_TESTS"), "set SBVF_NET_TESTS=1 for network tests")
     def test_real_github_clone(self):
         from sbvf.sast.repo import clone_repo, remove_tree

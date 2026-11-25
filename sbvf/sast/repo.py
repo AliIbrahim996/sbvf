@@ -2,13 +2,15 @@
 
 The SAST entry points (dashboard and ``sbvf.scan_code``) accept either a local
 folder or the URL of a *remote repository*. Remote repositories are restricted to
-the three public code hosts below, fetched with a shallow ``git clone`` into a
-temporary folder, scanned, and deleted afterwards.
+the three public code hosts below (plus any self-hosted hosts an operator adds
+via ``SBVF_EXTRA_GIT_HOSTS`` -- e.g. an internal GitLab), fetched with a shallow
+``git clone`` into a temporary folder, scanned, and deleted afterwards.
 
 Safety measures applied to every clone:
 
-* only ``https://`` URLs on exactly ``github.com``, ``gitlab.com`` or
-  ``bitbucket.org`` (an optional ``www.`` prefix is tolerated);
+* only ``https://`` URLs on ``github.com``, ``gitlab.com``, ``bitbucket.org``
+  or a host listed in ``SBVF_EXTRA_GIT_HOSTS`` (an optional ``www.`` prefix is
+  tolerated);
 * no credentials, ports, query strings or SSH/``file://``/``ext::`` transports;
 * web-UI URLs (``.../tree/main``, ``.../-/blob/...``, ``.../src/...``) are
   normalised to the repository's clone URL, and every path segment is validated;
@@ -31,18 +33,48 @@ import urllib.parse
 ALLOWED_HOSTS = {"github.com": "GitHub", "gitlab.com": "GitLab",
                  "bitbucket.org": "Bitbucket"}
 
+# Built-in hosts that use flat "owner/repo" paths. Every other accepted host
+# (gitlab.com and self-hosted hosts) is parsed GitLab-style: nested groups and
+# a "/-/" web-UI separator.
+_OWNER_REPO_HOSTS = {"github.com", "bitbucket.org"}
+
 _SEGMENT = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9._-]*$")
+# A conservative hostname (at least one dot, no scheme/port/path).
+_HOSTNAME = re.compile(r"^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$")
 
 
 class RepoURLError(ValueError):
     """The text is not an accepted remote-repository URL."""
 
 
+def _extra_hosts() -> dict:
+    """Self-hosted git hosts added via the ``SBVF_EXTRA_GIT_HOSTS`` env var.
+
+    The value is a comma/semicolon/space-separated list of hostnames (e.g.
+    ``gitlab.corp.example.com`` for an internal GitLab). They are validated as
+    hostnames, parsed GitLab-style, and -- like the built-ins -- cloned over
+    https only. Returns ``{host: host}`` (the host doubles as its display name).
+    """
+    out = {}
+    for tok in re.split(r"[,;\s]+", os.environ.get("SBVF_EXTRA_GIT_HOSTS", "")):
+        h = tok.strip().lower()
+        if h.startswith("www."):
+            h = h[4:]
+        if h and h not in ALLOWED_HOSTS and _HOSTNAME.match(h):
+            out[h] = h
+    return out
+
+
+def allowed_hosts() -> dict:
+    """The effective accepted hosts: the built-ins plus ``SBVF_EXTRA_GIT_HOSTS``."""
+    return {**ALLOWED_HOSTS, **_extra_hosts()}
+
+
 def is_repo_url(text: str) -> bool:
     """True if *text* looks like a remote URL (as opposed to a local folder)."""
     t = (text or "").strip().lower()
     return "://" in t or t.startswith("git@") or t.startswith(
-        tuple(h + "/" for h in ALLOWED_HOSTS)) or t.startswith("www.")
+        tuple(h + "/" for h in allowed_hosts())) or t.startswith("www.")
 
 
 def normalize_repo_url(text: str) -> str:
@@ -69,17 +101,17 @@ def normalize_repo_url(text: str) -> str:
     host = (p.hostname or "").lower()
     if host.startswith("www."):
         host = host[4:]
-    if host not in ALLOWED_HOSTS:
+    if host not in allowed_hosts():
         raise RepoURLError(
-            "only GitHub, GitLab and Bitbucket repositories are supported "
-            f"(got '{host or raw}')")
+            "only GitHub, GitLab and Bitbucket repositories (or a host listed in "
+            f"SBVF_EXTRA_GIT_HOSTS) are supported (got '{host or raw}')")
 
     segs = [s for s in urllib.parse.unquote(p.path).split("/") if s]
-    if host == "gitlab.com":
+    if host in _OWNER_REPO_HOSTS:                 # GitHub/Bitbucket: owner/repo
+        segs = segs[:2]
+    else:                                         # GitLab-style (incl. self-hosted)
         if "-" in segs:                           # .../group/sub/repo/-/tree/main
             segs = segs[:segs.index("-")]
-    else:                                         # GitHub/Bitbucket: owner/repo
-        segs = segs[:2]
     if segs and segs[-1].endswith(".git"):
         segs[-1] = segs[-1][:-4]
     if len(segs) < 2:

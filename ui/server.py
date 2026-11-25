@@ -22,7 +22,7 @@ from sbvf import datasets                    # noqa: E402
 from sbvf.experiment import iter_runs, analyze, SPLITS  # noqa: E402
 from sbvf.sast import scan_path, extract_routes, confirm_findings, TargetUnreachable  # noqa: E402
 from sbvf.sast.repo import (                 # noqa: E402
-    ALLOWED_HOSTS, RepoURLError, clone_repo, is_repo_url, normalize_repo_url,
+    allowed_hosts, RepoURLError, clone_repo, is_repo_url, normalize_repo_url,
     remove_tree)
 from sbvf import store                        # noqa: E402  (optional persistence)
 from testbed.launcher import start_all       # noqa: E402
@@ -326,7 +326,7 @@ class UIHandler(BaseHTTPRequestHandler):
                 try:
                     url = normalize_repo_url(custom)
                 except RepoURLError as exc:
-                    hosts = ", ".join(ALLOWED_HOSTS.values())
+                    hosts = ", ".join(allowed_hosts().values())
                     self._sse("scan_error", {"message": f"{exc}. Accepted: a local "
                                              f"folder or a {hosts} repository URL."})
                     return
