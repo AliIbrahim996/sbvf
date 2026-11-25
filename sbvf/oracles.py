@@ -157,8 +157,15 @@ class Oracle:
             return F.open_redirect_fitness(payload, r)
         if self.vuln == "idor":
             # Act as the low-privilege user; the payload is the object id tried.
-            r = self.target.get(self.path, {self.param: payload,
-                                            "token": self.low_priv_token})
+            # Route it through _dispatch so the id lands at the configured site
+            # (query / path / body) -- a path-segment id must go in the path, not
+            # the query -- while the low-priv token rides along as a query param.
+            saved = self.extra
+            self.extra = {**self.extra, "token": self.low_priv_token}
+            try:
+                r = self._dispatch(payload)
+            finally:
+                self.extra = saved
             return F.idor_fitness(r.body, r.status, self.low_priv_token)
         if self.vuln == "missing_auth":
             # Public-endpoint test: request the object with NO identity. The payload

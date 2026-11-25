@@ -57,6 +57,13 @@ function StepIcon({ kind }: { kind: StepKind }) {
           <path d="M12 9v4M12 17h.01" />
         </svg>
       );
+    case "confirmed":
+      return (
+        <svg {...common}>
+          <path d="M12 2 4 6v6c0 5 3.4 8.5 8 10 4.6-1.5 8-5 8-10V6z" />
+          <path d="m9 12 2 2 4-4" />
+        </svg>
+      );
     default: // vuln
       return (
         <svg {...common}>

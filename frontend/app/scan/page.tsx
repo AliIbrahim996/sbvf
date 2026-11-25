@@ -13,6 +13,7 @@ const STEP_BADGE: Record<string, { cls: string; label: string }> = {
   finding: { cls: "b-find", label: "FINDING" },
   summary: { cls: "b-sum", label: "DONE" },
   error: { cls: "b-find", label: "ERROR" },
+  confirm: { cls: "b-confirm", label: "CONFIRM" },
 };
 
 type Phase = "idle" | "live" | "done" | "err";
@@ -20,6 +21,7 @@ type Phase = "idle" | "live" | "done" | "err";
 export default function ScanPage() {
   const [sample, setSample] = useState("php_native");
   const [path, setPath] = useState("");
+  const [confirmUrl, setConfirmUrl] = useState("");
   const [steps, setSteps] = useState<{ kind: string; text: string }[]>([]);
   const [findings, setFindings] = useState<Finding[]>([]);
   const [result, setResult] = useState<ScanResult | null>(null);
@@ -62,7 +64,8 @@ export default function ScanPage() {
     setStatus(remote ? "Cloning repository…" : "Scanning…");
     setPhase("live");
     setScanning(true);
-    const qs = path.trim() ? `path=${encodeURIComponent(path.trim())}` : `sample=${sample}`;
+    let qs = path.trim() ? `path=${encodeURIComponent(path.trim())}` : `sample=${sample}`;
+    if (confirmUrl.trim()) qs += `&confirm=${encodeURIComponent(confirmUrl.trim())}`;
     const es = new EventSource(`/api/scan?${qs}`);
     esRef.current = es;
 
@@ -143,6 +146,16 @@ export default function ScanPage() {
             value={path}
             onChange={(e) => setPath(e.target.value)}
             placeholder="C:\path\to\project   or   https://github.com/owner/repo (overrides sample)"
+          />
+        </div>
+        <div className="field" style={{ flex: 1, minWidth: 240 }}>
+          <label htmlFor="confirm">Confirm live (optional) — URL of the running app</label>
+          <input
+            id="confirm"
+            type="text"
+            value={confirmUrl}
+            onChange={(e) => setConfirmUrl(e.target.value)}
+            placeholder="http://127.0.0.1:8000 — localhost only; SBVF connects and replays requests"
           />
         </div>
         <button className="btn btn-primary" onClick={scan} disabled={scanning}>

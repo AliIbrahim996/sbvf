@@ -20,7 +20,7 @@ sys.path.insert(0, ROOT)
 
 from sbvf import datasets                    # noqa: E402
 from sbvf.experiment import iter_runs, analyze, SPLITS  # noqa: E402
-from sbvf.sast import scan_path              # noqa: E402
+from sbvf.sast import scan_path, extract_routes, confirm_findings, TargetUnreachable  # noqa: E402
 from sbvf.sast.repo import (                 # noqa: E402
     ALLOWED_HOSTS, RepoURLError, clone_repo, is_repo_url, normalize_repo_url,
     remove_tree)
@@ -308,6 +308,7 @@ class UIHandler(BaseHTTPRequestHandler):
         """
         sample = qs.get("sample", [""])[0]
         custom = qs.get("path", [""])[0].strip()
+        confirm = qs.get("confirm", [""])[0].strip()   # optional live-confirm base URL
 
         self.send_response(200)
         self.send_header("Content-Type", "text/event-stream")
@@ -354,6 +355,27 @@ class UIHandler(BaseHTTPRequestHandler):
             result = scan_path(target, on_step=on_step)
             if clone_dir:
                 result["root"] = url
+
+            # Optional live confirmation: drive the search against a running
+            # instance of the app at a local base URL the user provides. This only
+            # sends requests to that URL (it never launches code), and Target
+            # refuses non-local hosts. Failure here must not lose the static result.
+            if confirm:
+                self._sse("scan_step", {"kind": "confirm", "text":
+                          f"Confirming findings against {confirm} "
+                          f"(connecting to your running app) ...", "data": {}})
+                try:
+                    summary = confirm_findings(
+                        result["findings"], confirm,
+                        routes=extract_routes(target), on_step=on_step)
+                    self._sse("scan_step", {"kind": "confirm", "text":
+                              f"Live confirmation: {summary['confirmed']} of "
+                              f"{summary['attempted']} probe(s) reproduced against "
+                              f"the running app.", "data": summary})
+                except (ValueError, TargetUnreachable) as exc:
+                    self._sse("scan_step", {"kind": "confirm", "text":
+                              f"Live confirmation skipped: {exc}", "data": {}})
+
             # Persist the scan (best-effort; a DB failure must not break the stream).
             try:
                 scan_type = ("repo" if (custom and is_repo_url(custom))

@@ -22,6 +22,23 @@ export interface Finding {
   owner?: string;
   exposure?: string[];
   action?: string;
+  dynamic?: DynamicConfirmation;
+}
+
+/** Result of live-confirming a finding against a running app (optional). */
+export interface DynamicCheck {
+  vuln: string;
+  path: string;
+  param: string;
+  method: string;
+  where: string;
+  algorithm: string;
+  evals: number | null;
+  payload: string;
+}
+export interface DynamicConfirmation {
+  confirmed: boolean;
+  checks: DynamicCheck[];
 }
 
 export interface ScanResult {
