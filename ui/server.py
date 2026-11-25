@@ -26,7 +26,8 @@ from sbvf.experiment import iter_runs, analyze, SPLITS  # noqa: E402
 from sbvf.sast import scan_path, extract_routes, confirm_findings, TargetUnreachable  # noqa: E402
 from sbvf.sast.repo import (                 # noqa: E402
     allowed_hosts, RepoURLError, checkout_branch, clone_repo, export_branch,
-    is_git_repo, is_repo_url, list_branches, normalize_repo_url, remove_tree)
+    is_git_repo, is_repo_url, list_branches, normalize_repo_url, remove_tree,
+    uses_credentials)
 from sbvf import store                        # noqa: E402  (optional persistence)
 from testbed.launcher import start_all       # noqa: E402
 
@@ -69,13 +70,100 @@ _PENDING_BRANCH: dict = {}
 _PENDING_LOCK = threading.Lock()
 BRANCH_SELECT_TIMEOUT = 300   # seconds to wait for the user's branch choice
 
+# A scan is started by `POST /api/scans` (which registers the parameters and
+# returns an opaque token) and then streamed by `GET /api/scans/<token>/events`.
+# Routing the start through a POST (JSON body, same-origin) is what stops a
+# cross-site `<img>`/`<script>` GET from driving the local API (see `_guard`).
+_SCAN_JOBS: dict = {}
+_SCAN_JOBS_LOCK = threading.Lock()
+SCAN_JOB_TTL = 300   # seconds a registered-but-unstarted job stays valid
+
+# Hostnames accepted in the `Host`/`Origin` headers. localhost forms always pass;
+# SBVF_ALLOWED_HOSTS adds more (e.g. the compose service name "sbvf", which the
+# Next.js proxy uses when it calls the backend as http://sbvf:8080).
+_LOCAL_HOST_NAMES = {"127.0.0.1", "localhost", "[::1]", "::1", ""}
+
+
+def _host_only(value: str) -> str:
+    """The hostname part of a `Host`/`Origin` netloc, lower-cased, port removed."""
+    h = (value or "").strip().lower()
+    if h.startswith("["):                 # [::1] or [::1]:8080
+        return h.split("]", 1)[0] + "]"
+    return h.rsplit(":", 1)[0] if ":" in h else h
+
+
+def allowed_host_names() -> set:
+    """Effective set of accepted hostnames (localhost plus SBVF_ALLOWED_HOSTS)."""
+    names = set(_LOCAL_HOST_NAMES)
+    for tok in os.environ.get("SBVF_ALLOWED_HOSTS", "").split(","):
+        name = _host_only(tok)
+        if name:
+            names.add(name)
+    return names
+
+
+class BadRequest(Exception):
+    """A query/body parameter failed validation -> HTTP 400."""
+
+
+def _int_param(qs, name, default, lo, hi):
+    """Parse a bounded integer query param, raising :class:`BadRequest` if invalid."""
+    raw = qs.get(name, [str(default)])[0]
+    raw = raw if (raw is not None and raw != "") else str(default)
+    try:
+        val = int(raw)
+    except (TypeError, ValueError):
+        raise BadRequest(f"{name} must be an integer")
+    if not lo <= val <= hi:
+        raise BadRequest(f"{name} must be between {lo} and {hi}")
+    return val
+
+
+def _prune_scan_jobs():
+    """Drop registered scan jobs that were never started (bounds memory). Call under lock."""
+    now = time.monotonic()
+    for tok in [t for t, p in _SCAN_JOBS.items() if now - p["created"] > SCAN_JOB_TTL]:
+        _SCAN_JOBS.pop(tok, None)
+
 
 class UIHandler(BaseHTTPRequestHandler):
     def log_message(self, *a):
         pass
 
+    def _guard(self, require_json: bool = False) -> bool:
+        """Reject DNS-rebinding / cross-site requests. True = already responded.
+
+        * ``Host`` must name localhost (or an SBVF_ALLOWED_HOSTS entry): a page on
+          a rebound attacker domain carries that domain in ``Host`` -> 421.
+        * ``Origin``, when present, must match -> a cross-site fetch is refused 403.
+        * state-changing POSTs must be ``application/json`` -> a cross-site "simple"
+          POST (text/plain or a form) cannot be forged without a CORS preflight.
+        """
+        allowed = allowed_host_names()
+        if _host_only(self.headers.get("Host", "")) not in allowed:
+            self._json({"message": "forbidden host"}, code=421)
+            return True
+        origin = self.headers.get("Origin")
+        if origin:
+            if _host_only(urllib.parse.urlparse(origin).netloc) not in allowed:
+                self._json({"message": "cross-origin request refused"}, code=403)
+                return True
+        if require_json:
+            ctype = self.headers.get("Content-Type", "").lower()
+            if not ctype.startswith("application/json"):
+                self._json({"message": "Content-Type must be application/json"}, code=415)
+                return True
+        return False
+
     def do_GET(self):
-        parsed = urllib.parse.urlparse(self.path)
+        if self._guard():
+            return
+        try:
+            self._route_get(urllib.parse.urlparse(self.path))
+        except BadRequest as exc:
+            self._json({"message": str(exc)}, code=400)
+
+    def _route_get(self, parsed):
         if parsed.path in ("/", "/index.html"):
             body = HTML.encode()
             self.send_response(200)
@@ -88,9 +176,6 @@ class UIHandler(BaseHTTPRequestHandler):
         if parsed.path == "/api/run":
             return self._stream(urllib.parse.parse_qs(parsed.query))
 
-        if parsed.path == "/api/scan":
-            return self._scan_stream(urllib.parse.parse_qs(parsed.query))
-
         if parsed.path == "/api/scans":
             return self._list_scans(urllib.parse.parse_qs(parsed.query))
 
@@ -99,6 +184,8 @@ class UIHandler(BaseHTTPRequestHandler):
 
         if parsed.path.startswith("/api/scans/"):
             parts = parsed.path.rstrip("/")[len("/api/scans/"):].split("/")
+            if len(parts) == 2 and parts[1] == "events":
+                return self._scan_events(parts[0])
             if len(parts) == 2 and parts[1] == "ai":
                 return self._get_scan_ai(parts[0])
             if len(parts) == 1 and parts[0]:
@@ -117,6 +204,8 @@ class UIHandler(BaseHTTPRequestHandler):
         self.end_headers()
 
     def do_DELETE(self):
+        if self._guard():
+            return
         parsed = urllib.parse.urlparse(self.path)
         if parsed.path.startswith("/api/scans/"):
             return self._delete_scan(parsed.path.rstrip("/").rsplit("/", 1)[-1])
@@ -124,8 +213,12 @@ class UIHandler(BaseHTTPRequestHandler):
         self.end_headers()
 
     def do_POST(self):
+        if self._guard(require_json=True):
+            return
         parsed = urllib.parse.urlparse(self.path)
         path = parsed.path.rstrip("/")
+        if path == "/api/scans":
+            return self._create_scan()
         if path == "/api/ask":
             return self._ask()
         if path == "/api/scan/branch":
@@ -135,6 +228,35 @@ class UIHandler(BaseHTTPRequestHandler):
             return self._run_agents(scan_id)
         self.send_response(404)
         self.end_headers()
+
+    def _create_scan(self):
+        """Register a scan job from a JSON body; return its streaming token.
+
+        The actual scan runs on ``GET /api/scans/<token>/events``. Starting a scan
+        requires this POST (JSON, same-origin), so a cross-site GET cannot."""
+        body = self._read_json_body()
+        params = {
+            "sample": str(body.get("sample", "") or ""),
+            "path": str(body.get("path", "") or "").strip(),
+            "confirm": str(body.get("confirm", "") or "").strip(),
+            "branch_select": bool(body.get("branch_select")),
+            "branch": str(body.get("branch", "") or "").strip(),
+            "created": time.monotonic(),
+        }
+        token = uuid.uuid4().hex
+        with _SCAN_JOBS_LOCK:
+            _prune_scan_jobs()
+            _SCAN_JOBS[token] = params
+        self._json({"scan_id": token, "events_url": f"/api/scans/{token}/events"})
+
+    def _scan_events(self, token):
+        """Stream a scan that ``_create_scan`` registered under *token* (one-shot)."""
+        with _SCAN_JOBS_LOCK:
+            _prune_scan_jobs()
+            params = _SCAN_JOBS.pop(token, None)
+        if params is None:
+            return self._json({"message": "unknown or expired scan job"}, code=404)
+        self._scan_stream(params)
 
     def _pick_branch(self):
         """Resume a scan that is waiting for a branch choice (see ``_resolve_branch``)."""
@@ -186,8 +308,8 @@ class UIHandler(BaseHTTPRequestHandler):
     def _list_scans(self, qs):
         if not store.is_enabled():
             return self._persistence_off()
-        limit = min(int(qs.get("limit", ["50"])[0] or 50), 200)
-        offset = int(qs.get("offset", ["0"])[0] or 0)
+        limit = _int_param(qs, "limit", 50, 1, 200)
+        offset = _int_param(qs, "offset", 0, 0, 1_000_000)
         self._json({"enabled": True, "scans": store.repository.list_scans(limit, offset)})
 
     def _get_scan(self, raw_id):
@@ -215,9 +337,9 @@ class UIHandler(BaseHTTPRequestHandler):
     def _list_activity(self, qs):
         if not store.is_enabled():
             return self._persistence_off()
-        limit = min(int(qs.get("limit", ["100"])[0] or 100), 500)
+        limit = _int_param(qs, "limit", 100, 1, 500)
         sid = qs.get("scan_id", [None])[0]
-        scan_id = int(sid) if sid not in (None, "") else None
+        scan_id = _int_param(qs, "scan_id", 1, 1, 1_000_000) if sid not in (None, "") else None
         self._json({"enabled": True,
                     "activity": store.repository.list_activity(limit, scan_id)})
 
@@ -312,7 +434,7 @@ class UIHandler(BaseHTTPRequestHandler):
     def _list_chat(self, qs):
         if not store.is_enabled():
             return self._persistence_off()
-        limit = min(int(qs.get("limit", ["50"])[0] or 50), 200)
+        limit = _int_param(qs, "limit", 50, 1, 200)
         sid = qs.get("scan_id", [None])[0]
         try:
             scan_id = int(sid) if sid not in (None, "") else None
@@ -322,25 +444,25 @@ class UIHandler(BaseHTTPRequestHandler):
             scan_id = None   # 0/negative is not a real scan id -> global thread
         self._json({"enabled": True, "messages": store.repository.list_chat(limit, scan_id)})
 
-    def _scan_stream(self, qs):
+    def _scan_stream(self, params):
         """Server-Sent Events stream for a static (SAST) source-code scan.
 
-        The ``path`` key is either a **local folder** or the URL of a **remote
-        repository** on GitHub, GitLab or Bitbucket (shallow-cloned to a temp
-        folder, scanned, then deleted). Without ``path``, ``sample`` selects a
-        bundled vulnerable project.
+        *params* is the dict registered by ``_create_scan``. The ``path`` key is
+        either a **local folder** or the URL of a **remote repository** on GitHub,
+        GitLab or Bitbucket (shallow-cloned to a temp folder, scanned, then
+        deleted). Without ``path``, ``sample`` selects a bundled vulnerable project.
 
         Any local folder is accepted while the dashboard is bound to localhost;
         if it is exposed on a network interface, local scans are confined to the
         project tree so it cannot be used to read arbitrary files.
         """
-        sample = qs.get("sample", [""])[0]
-        custom = qs.get("path", [""])[0].strip()
-        confirm = qs.get("confirm", [""])[0].strip()   # optional live-confirm base URL
-        # Branch selection for a cloned repo: `branch_select=1` makes the stream
+        sample = params.get("sample", "")
+        custom = (params.get("path", "") or "").strip()
+        confirm = (params.get("confirm", "") or "").strip()  # optional live-confirm URL
+        # Branch selection for a cloned repo: `branch_select` makes the stream
         # pause and prompt; `branch=<name>` checks that branch out directly.
-        want_select = qs.get("branch_select", [""])[0].strip() in ("1", "true", "yes")
-        want_branch = qs.get("branch", [""])[0].strip()
+        want_select = bool(params.get("branch_select"))
+        want_branch = (params.get("branch", "") or "").strip()
 
         self.send_response(200)
         self.send_header("Content-Type", "text/event-stream")
@@ -366,6 +488,11 @@ class UIHandler(BaseHTTPRequestHandler):
                                              f"folder or a {hosts} repository URL."})
                     return
                 all_branches = want_select or bool(want_branch)
+                if uses_credentials(url):
+                    host = urllib.parse.urlparse(url).hostname or ""
+                    self._sse("scan_step", {"kind": "clone", "text":
+                              f"Using your machine's git credentials for {host}",
+                              "data": {}})
                 self._sse("scan_step", {"kind": "clone", "text":
                           f"Cloning {url} (shallow, depth 1"
                           f"{', all branches' if all_branches else ''}) ...",
@@ -544,8 +671,8 @@ class UIHandler(BaseHTTPRequestHandler):
 
     def _stream(self, qs):
         split = qs.get("split", ["all"])[0]
-        runs = int(qs.get("runs", ["10"])[0])
-        budget = int(qs.get("budget", ["150"])[0])
+        runs = _int_param(qs, "runs", 10, 1, 100)
+        budget = _int_param(qs, "budget", 150, 10, 2000)
         endpoints = SPLITS.get(split, SPLITS["all"])()
 
         self.send_response(200)

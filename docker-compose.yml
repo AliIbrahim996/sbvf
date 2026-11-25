@@ -14,9 +14,15 @@ services:
     build: .
     image: sbvf:latest
     ports:
-      - "8080:8080"
+      # Bind to the loopback interface only, so the API is not reachable from
+      # other machines on the network. Expose it deliberately (and add auth) if
+      # you need to; change this to "8080:8080" to publish on all interfaces.
+      - "127.0.0.1:8080:8080"
     environment:
       SBVF_UI_HOST: "0.0.0.0"
+      # The Next.js proxy reaches the backend as http://sbvf:8080, so allow that
+      # Host header through the request guard (see ui/server.py `_guard`).
+      SBVF_ALLOWED_HOSTS: "sbvf"
       # Persistence: point the backend at the postgres service. Remove this line
       # (or the db service) to run without persistence — scans still work.
       DATABASE_URL: "postgresql://sbvf:sbvf@db:5432/sbvf"
@@ -59,7 +65,8 @@ services:
     build: ./frontend
     image: sbvf-frontend:latest
     ports:
-      - "3000:3000"
+      # Loopback only (see the backend note above).
+      - "127.0.0.1:3000:3000"
     environment:
       # The Next.js route handler proxies /api/* to the backend. Inside the
       # compose network the backend is reachable by its service name.

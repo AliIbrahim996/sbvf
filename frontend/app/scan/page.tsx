@@ -55,7 +55,7 @@ export default function ScanPage() {
     }
   }
 
-  function scan() {
+  async function scan() {
     esRef.current?.close();
     setSteps([]);
     setFindings([]);
@@ -71,12 +71,37 @@ export default function ScanPage() {
     setStatus(remote ? "Cloning repository…" : "Scanning…");
     setPhase("live");
     setScanning(true);
-    let qs = t ? `path=${encodeURIComponent(t)}` : `sample=${sample}`;
-    // Offer a branch list for any repo URL or local git folder (the backend only
-    // prompts when the target is actually a git repo with more than one branch).
-    if (t) qs += `&branch_select=1`;
-    if (confirmUrl.trim()) qs += `&confirm=${encodeURIComponent(confirmUrl.trim())}`;
-    const es = new EventSource(`/api/scan?${qs}`);
+
+    // Start the scan with a same-origin POST, then stream it over SSE. Routing the
+    // start through POST (JSON body) is what stops a cross-site GET (an <img> tag,
+    // say) from driving the local API — see ui/server.py `_guard`.
+    // branch_select is offered for any repo URL or local git folder; the backend
+    // only prompts when the target is really a git repo with more than one branch.
+    const payload: Record<string, unknown> = t ? { path: t, branch_select: true } : { sample };
+    if (confirmUrl.trim()) payload.confirm = confirmUrl.trim();
+
+    let eventsUrl: string;
+    try {
+      const res = await fetch("/api/scans", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+      if (!res.ok) {
+        const d = await res.json().catch(() => ({}));
+        throw new Error(d?.message || `could not start scan (${res.status})`);
+      }
+      const d = await res.json();
+      eventsUrl = d.events_url || `/api/scans/${d.scan_id}/events`;
+    } catch (err) {
+      pushStep({ kind: "error", text: err instanceof Error ? err.message : "could not start the scan" });
+      setStatus("Error");
+      setPhase("err");
+      setScanning(false);
+      return;
+    }
+
+    const es = new EventSource(eventsUrl);
     esRef.current = es;
 
     es.addEventListener("branch_prompt", (e) => {
