@@ -82,6 +82,35 @@ _RUN_JOBS: dict = {}
 _JOBS_LOCK = threading.Lock()
 JOB_TTL = 300   # seconds a registered-but-unstarted job stays valid
 
+# Concurrency limit: a scan (clone + analyze) and a benchmark run are both heavy,
+# so each kind has a small cap on how many may be in flight at once. A POST that
+# would exceed the cap is refused with 429 (+ Retry-After) instead of piling work
+# onto the box. A "slot" is taken when a job is registered and freed when its
+# stream ends — or when an abandoned job (POSTed but never streamed) is pruned, so
+# slots can't leak. Caps are configurable; 0/empty falls back to the default.
+MAX_ACTIVE = {
+    "scan": int(os.environ.get("SBVF_MAX_CONCURRENT_SCANS") or "2"),
+    "run": int(os.environ.get("SBVF_MAX_CONCURRENT_RUNS") or "1"),
+}
+_active = {"scan": 0, "run": 0}
+BUSY_RETRY_AFTER = 10   # seconds; advisory Retry-After on a 429
+
+
+def _take_slot(kind: str) -> bool:
+    """Reserve an execution slot for *kind* ('scan'/'run'); False if at capacity.
+
+    Call under ``_JOBS_LOCK`` (it reads and mutates the shared ``_active`` count)."""
+    if _active[kind] >= MAX_ACTIVE[kind]:
+        return False
+    _active[kind] += 1
+    return True
+
+
+def _free_slot(kind: str) -> None:
+    """Release an execution slot for *kind*. Call under ``_JOBS_LOCK``."""
+    if _active[kind] > 0:
+        _active[kind] -= 1
+
 # Hostnames accepted in the `Host`/`Origin` headers. localhost forms always pass;
 # SBVF_ALLOWED_HOSTS adds more (e.g. the compose service name "sbvf", which the
 # Next.js proxy uses when it calls the backend as http://sbvf:8080). An empty
@@ -140,11 +169,13 @@ def _int_body(body, name, default, lo, hi):
     return val
 
 
-def _prune_jobs(jobs: dict) -> None:
-    """Drop registered jobs that were never started (bounds memory). Call under lock."""
+def _prune_jobs(jobs: dict, kind: str) -> None:
+    """Drop registered jobs that were never started (bounds memory) and free the
+    execution slot each one held. Call under ``_JOBS_LOCK``."""
     now = time.monotonic()
     for tok in [t for t, p in jobs.items() if now - p["created"] > JOB_TTL]:
         jobs.pop(tok, None)
+        _free_slot(kind)
 
 
 class UIHandler(BaseHTTPRequestHandler):
@@ -295,18 +326,26 @@ class UIHandler(BaseHTTPRequestHandler):
         }
         token = uuid.uuid4().hex
         with _JOBS_LOCK:
-            _prune_jobs(_SCAN_JOBS)
-            _SCAN_JOBS[token] = params
+            _prune_jobs(_SCAN_JOBS, "scan")
+            took = _take_slot("scan")
+            if took:
+                _SCAN_JOBS[token] = params
+        if not took:
+            return self._busy("scan")
         self._json({"scan_id": token, "events_url": f"/api/scans/{token}/events"})
 
     def _scan_events(self, token):
         """Stream a scan that ``_create_scan`` registered under *token* (one-shot)."""
         with _JOBS_LOCK:
-            _prune_jobs(_SCAN_JOBS)
+            _prune_jobs(_SCAN_JOBS, "scan")
             params = _SCAN_JOBS.pop(token, None)
         if params is None:
             return self._json({"message": "unknown or expired scan job"}, code=404)
-        self._scan_stream(params)
+        try:
+            self._scan_stream(params)
+        finally:
+            with _JOBS_LOCK:
+                _free_slot("scan")
 
     def _create_run(self):
         """Register a benchmark run from a JSON body; return its streaming token.
@@ -325,18 +364,26 @@ class UIHandler(BaseHTTPRequestHandler):
         }
         token = uuid.uuid4().hex
         with _JOBS_LOCK:
-            _prune_jobs(_RUN_JOBS)
-            _RUN_JOBS[token] = params
+            _prune_jobs(_RUN_JOBS, "run")
+            took = _take_slot("run")
+            if took:
+                _RUN_JOBS[token] = params
+        if not took:
+            return self._busy("run")
         self._json({"run_id": token, "events_url": f"/api/runs/{token}/events"})
 
     def _run_events(self, token):
         """Stream a benchmark that ``_create_run`` registered under *token* (one-shot)."""
         with _JOBS_LOCK:
-            _prune_jobs(_RUN_JOBS)
+            _prune_jobs(_RUN_JOBS, "run")
             params = _RUN_JOBS.pop(token, None)
         if params is None:
             return self._json({"message": "unknown or expired run job"}, code=404)
-        self._stream(params)
+        try:
+            self._stream(params)
+        finally:
+            with _JOBS_LOCK:
+                _free_slot("run")
 
     def _pick_branch(self):
         """Resume a scan that is waiting for a branch choice (see ``_resolve_branch``)."""
@@ -374,13 +421,22 @@ class UIHandler(BaseHTTPRequestHandler):
         self.wfile.write(payload.encode("utf-8"))
         self.wfile.flush()
 
-    def _json(self, obj, code=200):
+    def _json(self, obj, code=200, headers=None):
         body = json.dumps(obj, ensure_ascii=False).encode("utf-8")
         self.send_response(code)
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
+        for name, value in (headers or {}).items():
+            self.send_header(name, str(value))
         self.end_headers()
         self.wfile.write(body)
+
+    def _busy(self, kind: str) -> None:
+        """Refuse a POST with 429 because *kind* is at its concurrency cap."""
+        noun = "scans" if kind == "scan" else "benchmark runs"
+        self._json({"message": f"too many concurrent {noun}; please wait for one "
+                               f"to finish and try again"},
+                   code=429, headers={"Retry-After": BUSY_RETRY_AFTER})
 
     # ---- persistence-backed endpoints (no-op friendly when the DB is off) ----
     def _persistence_off(self):

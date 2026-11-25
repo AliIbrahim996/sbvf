@@ -8,7 +8,9 @@ Runnable with pytest or `python -m tests.test_ui_server`.
 """
 import http.client
 import os
+import shutil
 import sys
+import tempfile
 import threading
 import time
 import unittest
@@ -29,6 +31,13 @@ class _Server:
         self.srv = ThreadingHTTPServer(("127.0.0.1", 0), server.UIHandler)
         threading.Thread(target=self.srv.serve_forever, daemon=True).start()
         self.port = self.srv.server_address[1]
+        # Slot counters and job registries are module-level (one server process in
+        # production); reset them so each test starts from a clean, isolated slate.
+        with server._JOBS_LOCK:
+            server._active["scan"] = 0
+            server._active["run"] = 0
+            server._SCAN_JOBS.clear()
+            server._RUN_JOBS.clear()
         time.sleep(0.1)
         return self
 
@@ -248,6 +257,91 @@ class TestBoundedParams(unittest.TestCase):
                                   headers={"Content-Type": "application/json"},
                                   body=json.dumps({"budget": 1}))
             self.assertEqual(status, 400)
+
+
+class TestConcurrencyLimit(unittest.TestCase):
+    def test_scan_post_429_when_at_capacity(self):
+        orig = server.MAX_ACTIVE["scan"]
+        server.MAX_ACTIVE["scan"] = 1
+        try:
+            with _Server() as s:                # __enter__ zeroes the counters
+                with server._JOBS_LOCK:
+                    server._active["scan"] = 1  # pretend one scan is already running
+                status, body = s.request(
+                    "POST", "/api/scans",
+                    headers={"Content-Type": "application/json"},
+                    body=json.dumps({"sample": "php_native"}))
+                self.assertEqual(status, 429)
+                self.assertIn("message", json.loads(body))
+        finally:
+            server.MAX_ACTIVE["scan"] = orig
+
+    def test_run_post_429_when_at_capacity(self):
+        orig = server.MAX_ACTIVE["run"]
+        server.MAX_ACTIVE["run"] = 1
+        try:
+            with _Server() as s:
+                with server._JOBS_LOCK:
+                    server._active["run"] = 1
+                status, _ = s.request(
+                    "POST", "/api/runs",
+                    headers={"Content-Type": "application/json"},
+                    body=json.dumps({"split": "all"}))
+                self.assertEqual(status, 429)
+        finally:
+            server.MAX_ACTIVE["run"] = orig
+
+    def _wait_slot_zero(self, kind, timeout=5.0):
+        # The server frees the slot in a finally block just after it sends the final
+        # event, which can land a hair after the client sees it and closes; poll.
+        end = time.time() + timeout
+        while time.time() < end and server._active[kind] != 0:
+            time.sleep(0.02)
+        self.assertEqual(server._active[kind], 0)
+
+    def test_scan_slot_released_after_stream(self):
+        with _Server() as s:
+            _, body = s.request("POST", "/api/scans",
+                                headers={"Content-Type": "application/json"},
+                                body=json.dumps({"sample": "php_native"}))
+            token = json.loads(body)["scan_id"]
+            self.assertEqual(server._active["scan"], 1)        # held while registered
+            s.stream(f"/api/scans/{token}/events", until="event: scan_done")
+            self._wait_slot_zero("scan")                       # freed when the stream ends
+
+    def test_abandoned_scan_slot_is_pruned(self):
+        # A job that is POSTed but never streamed must not leak its slot: pruning
+        # the expired job frees it.
+        with _Server() as s:
+            _, body = s.request("POST", "/api/scans",
+                                headers={"Content-Type": "application/json"},
+                                body=json.dumps({"sample": "php_native"}))
+            token = json.loads(body)["scan_id"]
+            self.assertEqual(server._active["scan"], 1)
+            with server._JOBS_LOCK:
+                server._SCAN_JOBS[token]["created"] -= server.JOB_TTL + 1
+                server._prune_jobs(server._SCAN_JOBS, "scan")
+            self.assertNotIn(token, server._SCAN_JOBS)
+            self.assertEqual(server._active["scan"], 0)
+
+
+class TestCloneSizeLimit(unittest.TestCase):
+    def test_tree_size_over_detects_excess(self):
+        d = tempfile.mkdtemp(prefix="sbvf_sizetest_")
+        try:
+            with open(os.path.join(d, "big.bin"), "wb") as fh:
+                fh.write(b"\0" * 4096)
+            self.assertTrue(repo._tree_size_over(d, 1024))    # 4 KiB > 1 KiB cap
+            self.assertFalse(repo._tree_size_over(d, 8192))   # 4 KiB < 8 KiB cap
+        finally:
+            shutil.rmtree(d, ignore_errors=True)
+
+    def test_empty_tree_is_never_over(self):
+        d = tempfile.mkdtemp(prefix="sbvf_sizetest_")
+        try:
+            self.assertFalse(repo._tree_size_over(d, 0))
+        finally:
+            shutil.rmtree(d, ignore_errors=True)
 
 
 class TestCredentialScrubbing(unittest.TestCase):
