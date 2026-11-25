@@ -1329,6 +1329,46 @@ class TestCryptoRulePrecision(unittest.TestCase):
                      "        'api_key' => 'AKIA1234567890',"):
             self.assertIn("hardcoded_secret", self._v(line), line)
 
+    def _vf(self, rel, line):
+        from sbvf.sast.rules import scan_text
+        return [f.vuln for f in scan_text(rel, line)]
+
+    def test_placeholder_values_not_flagged(self):
+        # reported FP: a key assigned an obvious placeholder is not a secret.
+        for line in ("        'apiKey' => 'your_api_key',",
+                     "        'token' => 'changeme',",
+                     "        'secret' => '<your-secret-here>',",
+                     "        'password' => 'placeholder',"):
+            self.assertNotIn("hardcoded_secret", self._v(line), line)
+
+    def test_i18n_message_values_not_flagged(self):
+        # reported FP: Arabic/English UI strings in a message catalogue are prose,
+        # not secrets -- both by value (whitespace) and by path (messages/ dir).
+        rel = "protected/messages/ar/kayishha_dealer_app.php"
+        for line in ("    'password' => 'إسم المستخدم أو كلمة السر غير صحيحة',",
+                     "    'incorrect_password' => 'كلمة السر غير صحيحة',",
+                     "    'password_should_be_strong' => 'يجب أن تحتوي كلمة السر على الأقل',"):
+            self.assertNotIn("hardcoded_secret", self._vf(rel, line), line)
+        # the whitespace veto also catches a prose value outside a messages dir
+        self.assertNotIn("hardcoded_secret",
+                         self._v("    'incorrect_password' => 'كلمة السر غير صحيحة',"))
+
+    def test_enum_label_echoing_key_not_flagged(self):
+        # reported FP: a const whose value just echoes the key is an enum label.
+        for line in ("    const SCENARIO_PASSWORD_CHANGE = 'passwordChange';",
+                     "        'password' => 'password',"):
+            self.assertNotIn("hardcoded_secret", self._v(line), line)
+
+    def test_test_fixture_tokens_not_flagged(self):
+        # reported FP: fake tokens in a test fixture file are not real secrets.
+        line = "    'c_device_token' => 'B5B4F7DE-8675-434E-AD47-ERED34533454',"
+        for rel in ("protected/tests/fixtures/x2_apitoken.php",
+                    "app/__tests__/auth.spec.js", "src/user.test.js"):
+            self.assertNotIn("hardcoded_secret", self._vf(rel, line), rel)
+        # but the same token in real application code is still flagged
+        self.assertIn("hardcoded_secret",
+                      self._vf("protected/components/Api.php", line))
+
 
 class TestSecurityMisconfig(unittest.TestCase):
     """OWASP A02: config pattern rules fire on the misconfigured sample, not on

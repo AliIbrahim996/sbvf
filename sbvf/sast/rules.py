@@ -47,6 +47,9 @@ class Rule:
     exclude: Optional[str] = None
     # Optional per-match veto: called with the regex match, True => skip.
     veto: Optional[Callable[["re.Match"], bool]] = None
+    # Optional per-file veto: called with the file's relative path, True => skip
+    # this rule for the whole file (e.g. test fixtures / i18n message catalogues).
+    file_veto: Optional[Callable[[str], bool]] = None
     _compiled: Dict[str, List[Pattern]] = field(default_factory=dict, repr=False)
     _req: Optional[Pattern] = field(default=None, repr=False)
     _exc: Optional[Pattern] = field(default=None, repr=False)
@@ -105,6 +108,26 @@ _CAST_DIRECTIVES = {
     "hashed", "encrypted", "encrypted:array", "encrypted:collection",
     "encrypted:json", "encrypted:object",
 }
+# Directories whose string literals are not real secrets: test fixtures and
+# i18n message catalogues (both routinely hold fake tokens / human text).
+_SECRET_SKIP_DIR = re.compile(
+    r"(?:^|/)(?:tests?|__tests__|specs?|fixtures?|mocks?|stubs?|"
+    r"messages|lang|langs|locale|locales|i18n|translations?|translation)(?:/|$)",
+    re.I)
+_SECRET_SKIP_FILE = re.compile(
+    r"(?:^|/)(?:test_|spec_)|[._-](?:test|spec|fixture|mock|stub)s?\.\w+$", re.I)
+# Obvious placeholder values ("your_api_key", "changeme", "<secret>", ...). The
+# leading-word prefixes stay narrow ("your...") so real secrets like
+# "my-super-secret" are not swallowed.
+_PLACEHOLDER_VAL = re.compile(
+    r"^(?:your|put[_\- ]?your|insert[_\- ]?your)[_\- ]|"
+    r"(?:change[_\- ]?me|replace[_\- ]?me|placeholder|dummy[_\- ]?value|"
+    r"todo|tbd|xxx+|secret[_\- ]?here|<[^>]+>|\*{3,})", re.I)
+
+
+def _secret_path_veto(rel: str) -> bool:
+    """Skip the hardcoded-secret rule for test fixtures and i18n catalogues."""
+    return bool(_SECRET_SKIP_DIR.search(rel) or _SECRET_SKIP_FILE.search(rel))
 
 
 def _components(name: str) -> set:
@@ -143,10 +166,16 @@ def _hardcoded_veto(m: "re.Match") -> bool:
         return True
     if low.startswith(("http://", "https://", "/", "./", "<", "{{", "${", "%(", "env:")):
         return True
-    if re.fullmatch(r"[a-z_ \-.]+", val) and " " in val:     # prose label: "Enter password"
+    if re.search(r"\s", val):        # whitespace -> message/label/prose, not a token
+        return True                  # e.g. "Enter password", i18n "كلمة السر غير صحيحة"
+    if _PLACEHOLDER_VAL.search(val):                # 'apiKey' => 'your_api_key'
         return True
-    if re.fullmatch(r"[\w\-]+", val) and val.lower() == name.lower():   # 'password': 'password'
-        return True
+    # Value just echoes the key: an enum/scenario label, not a stored secret.
+    # 'password' => 'password'; const SCENARIO_PASSWORD_CHANGE = 'passwordChange'.
+    if re.fullmatch(r"[\w\-]+", val):
+        vcomp, ncomp = _components(val), _components(name)
+        if vcomp and vcomp <= ncomp:
+            return True
     return False
 
 
@@ -214,6 +243,7 @@ RULES: List[Rule] = [
         exclude=r"(?:environ|getenv|process\s*\.\s*env|\$_ENV|\$_SERVER|config\s*\(|"
                 r"settings\s*\.|secrets\s*\.)",
         veto=_hardcoded_veto,
+        file_veto=_secret_path_veto,
         message="A key, secret, password, token or IV is embedded as a string literal "
                 "in source code."),
     Rule(
@@ -399,10 +429,13 @@ def scan_text(rel: str, source: str, framework: str = "",
     """Apply the rules to one file's text and return findings."""
     lang = _lang(rel)
     out: List[Finding] = []
+    # Drop rules that veto this whole file (e.g. hardcoded-secret in test fixtures
+    # or i18n catalogues) once up front, rather than per line.
+    active = [r for r in (rules or RULES) if not (r.file_veto and r.file_veto(rel))]
     for ln, line in enumerate(source.splitlines(), 1):
         if len(line) > 600 or _COMMENT.match(line):
             continue                                   # minified / comment line
-        for rule in (rules or RULES):
+        for rule in active:
             m = rule.match(lang, line)
             if not m:
                 continue
