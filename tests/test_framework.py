@@ -17,8 +17,11 @@ from sbvf import fitness, stats                              # noqa: E402
 from sbvf.individual import GRAMMARS, Individual, crossover  # noqa: E402
 from sbvf.algorithms import ALGORITHMS                       # noqa: E402
 from sbvf.oracles import Oracle, Target                      # noqa: E402
+from sbvf.sast import scan_path, derive_endpoints, extract_routes  # noqa: E402
 import testbed.app as app                                    # noqa: E402
 import testbed.apps.authapp as authapp                        # noqa: E402
+
+_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
 class TestIndividual(unittest.TestCase):
@@ -87,6 +90,38 @@ class TestFitness(unittest.TestCase):
     def test_rbac_forbidden_not_confirmed(self):
         fit, conf = fitness.rbac_fitness("forbidden", 403)
         self.assertFalse(conf)
+
+    def test_missing_auth_public_endpoint_confirmed(self):
+        fit, conf = fitness.missing_auth_fitness("owner=u2 secret=x", 200)
+        self.assertEqual(fit, 1.0)
+        self.assertTrue(conf)
+
+    def test_missing_auth_unauthorized_not_confirmed(self):
+        for status in (401, 403):
+            fit, conf = fitness.missing_auth_fitness("forbidden", status)
+            self.assertEqual(fit, 0.0)
+            self.assertFalse(conf)
+
+    def test_missing_auth_login_redirect_not_confirmed(self):
+        fit, conf = fitness.missing_auth_fitness("", 302)
+        self.assertFalse(conf)
+
+    def test_missing_auth_login_prompt_body_not_confirmed(self):
+        # A 200 that is actually a login page, not the protected data.
+        fit, conf = fitness.missing_auth_fitness("<p>login required</p>", 200)
+        self.assertFalse(conf)
+
+    def test_missing_auth_benign_200_not_confirmed(self):
+        # Reachable with no auth but carries nothing sensitive -> not a finding.
+        fit, conf = fitness.missing_auth_fitness("<p>home</p>", 200)
+        self.assertFalse(conf)
+
+    def test_missing_auth_sensitive_data_wins_over_nav_login_link(self):
+        # Data served with no auth is public even if the page has a 'Sign in' nav link.
+        body = "<nav><a href='/login'>Sign in</a></nav><p>owner=u2 secret=x</p>"
+        fit, conf = fitness.missing_auth_fitness(body, 200)
+        self.assertEqual(fit, 1.0)
+        self.assertTrue(conf)
 
 
 class TestStats(unittest.TestCase):
@@ -185,6 +220,53 @@ class TestAccessControl(unittest.TestCase):
     def test_rbac_safe_clean(self):
         o = Oracle(Target(self.base), "/rbac/admin_safe", None, "rbac")
         self.assertFalse(ALGORITHMS["CS"](o, 200, 0).confirmed)
+
+    def test_missing_auth_public_endpoint_detected(self):
+        # /idor/account never checks the token, so it serves a secret with no auth.
+        o = Oracle(Target(self.base), "/idor/account", "id", "missing_auth")
+        self.assertTrue(ALGORITHMS["GA"](o, 200, 0).confirmed)
+
+    def test_missing_auth_owner_scoped_endpoint_clean(self):
+        # /idor/account_safe requires ownership, so an anonymous caller gets 403.
+        o = Oracle(Target(self.base), "/idor/account_safe", "id", "missing_auth")
+        self.assertFalse(ALGORITHMS["RS"](o, 200, 0).confirmed)
+
+    def test_missing_auth_login_required_endpoint_clean(self):
+        # /rbac/admin returns 401 without a token -> not a public endpoint.
+        o = Oracle(Target(self.base), "/rbac/admin", None, "missing_auth")
+        self.assertFalse(ALGORITHMS["RS"](o, 50, 0).confirmed)
+
+    def test_missing_auth_does_not_use_supplied_session(self):
+        # Even with a valid session cookie, the public-endpoint probe drops it, so a
+        # properly protected endpoint is not misreported as public.
+        o = Oracle(Target(self.base, cookies={"token": "u1"}),
+                   "/idor/account_safe", "id", "missing_auth")
+        self.assertFalse(ALGORITHMS["RS"](o, 200, 0).confirmed)
+
+
+class TestSastToDynamicBridge(unittest.TestCase):
+    """The static->dynamic bridge turns an IDOR finding into search-ready endpoints."""
+
+    SAMPLE = os.path.join(_ROOT, "testbed", "sast_samples", "idor_django")
+
+    def test_idor_bridges_to_idor_and_missing_auth(self):
+        res = scan_path(self.SAMPLE)
+        routes = extract_routes(self.SAMPLE)
+        eps, skipped = derive_endpoints(res["findings"], routes=routes)
+        self.assertEqual(sorted({e.vuln for e in eps}), ["idor", "missing_auth"])
+        for e in eps:                         # both drive the recovered path-segment route
+            self.assertEqual(e.where, "path")
+            self.assertIn("__SBVF__", e.path_template or "")
+            self.assertEqual(e.param, "order_id")
+
+    def test_non_http_class_stays_static_only(self):
+        finding = {"vuln": "weak_crypto", "param": "", "method": "GET",
+                   "framework": "python", "file": "x.py", "location": "x.py:1",
+                   "function": ""}
+        eps, skipped = derive_endpoints([finding])
+        self.assertEqual(eps, [])
+        self.assertEqual(len(skipped), 1)
+        self.assertIn("not dynamically confirmable", skipped[0]["reason"])
 
 
 if __name__ == "__main__":

@@ -135,6 +135,20 @@ VULN_INFO = {
             "Prefer unguessable identifiers, but treat them as defense in depth, not the control.",
         ],
     },
+    "missing_auth": {
+        "cwe": "CWE-306", "severity": "high", "title": "Missing Authentication (Public Endpoint)",
+        "desc": "A sensitive endpoint returns protected data with no authentication, so an "
+                "unauthenticated caller can read it directly.",
+        "owner": "Backend / auth", "exposure": ["Data", "Accounts"],
+        "impact": "An attacker with no account can reach data or actions that should require "
+                  "sign-in — reading other users' records or invoking privileged functions — "
+                  "a broken-access-control breach that needs no credentials at all.",
+        "fix": [
+            "Require authentication on the endpoint (middleware, decorator, or route guard).",
+            "Deny by default: make the framework reject unauthenticated requests before the handler runs.",
+            "Add an authorization check once authenticated so identity is also scoped to the data.",
+        ],
+    },
     "weak_crypto": {
         "cwe": "CWE-327", "severity": "medium", "title": "Weak or Broken Cryptography",
         "desc": "A weak hash (MD5/SHA-1) or a broken cipher/mode (DES, 3DES, RC4, ECB) is used.",
