@@ -1224,6 +1224,21 @@ class TestCryptoRulePrecision(unittest.TestCase):
         # a standalone 'key' is no longer enough context for weak-random
         self.assertNotIn("weak_random", self._v("chosen = random.choice(the_key_list)"))
 
+    def test_laravel_cast_directives_not_secret(self):
+        # a secret-named attribute mapped to a framework cast directive (Laravel
+        # $casts / casts()) is a cast instruction, not a hardcoded secret.
+        for line in ("        'password' => 'hashed',",
+                     "        'secret_token' => 'encrypted',",
+                     "        'ssn' => 'encrypted:array',",
+                     "        'api_key' => 'encrypted:json',"):
+            self.assertNotIn("hardcoded_secret", self._v(line), line)
+
+    def test_real_secret_in_array_still_flagged(self):
+        # the fix must not suppress a genuine hardcoded secret in array syntax
+        for line in ("        'password' => 'hunter2secret',",
+                     "        'api_key' => 'AKIA1234567890',"):
+            self.assertIn("hardcoded_secret", self._v(line), line)
+
 
 class TestSecurityMisconfig(unittest.TestCase):
     """OWASP A02: config pattern rules fire on the misconfigured sample, not on

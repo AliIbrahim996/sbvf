@@ -98,6 +98,13 @@ _NOT_SECRET_SUFFIX = re.compile(
     r"(?:url|uri|field|name|header|type|param|label|path|file|endpoint|"
     r"prompt|placeholder|regex|pattern|expiry|ttl|length|size|id|"
     r"cookie|claim|prefix)[\"']?$", re.I)
+# Framework cast/transform directives (e.g. Laravel $casts / casts()): a
+# secret-named attribute mapped to one of these is a cast instruction, not a
+# stored secret — ['password' => 'hashed'], ['token' => 'encrypted'].
+_CAST_DIRECTIVES = {
+    "hashed", "encrypted", "encrypted:array", "encrypted:collection",
+    "encrypted:json", "encrypted:object",
+}
 
 
 def _components(name: str) -> set:
@@ -132,6 +139,8 @@ def _hardcoded_veto(m: "re.Match") -> bool:
     if _NOT_SECRET_SUFFIX.search(name) or not _name_is_secret(name):
         return True
     low = val.lower()
+    if low in _CAST_DIRECTIVES:                     # Laravel cast, not a secret value
+        return True
     if low.startswith(("http://", "https://", "/", "./", "<", "{{", "${", "%(", "env:")):
         return True
     if re.fullmatch(r"[a-z_ \-.]+", val) and " " in val:     # prose label: "Enter password"
