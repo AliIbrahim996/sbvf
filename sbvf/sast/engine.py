@@ -12,7 +12,7 @@ import re
 from typing import Callable, Dict, List, Optional
 
 from .model import Finding, Step, SEVERITY_RANK, VULN_INFO
-from .detect import SKIP_DIRS, iter_source_files, detect_frameworks, framework_for
+from .detect import prune_dirs, iter_source_files, detect_frameworks, framework_for
 from .php import PhpAnalyzer
 from .python_analyzer import PythonAnalyzer
 from .js import JsAnalyzer
@@ -146,8 +146,9 @@ def _template_findings(base: str, flows) -> List[Finding]:
     the page -- with the template engine and location in the sink.
     """
     templates = []
+    base = os.path.abspath(base)
     for dirpath, dirnames, filenames in os.walk(base):
-        dirnames[:] = [d for d in dirnames if d not in SKIP_DIRS]
+        prune_dirs(base, dirpath, dirnames)
         templates += [os.path.relpath(os.path.join(dirpath, fn), base).replace("\\", "/")
                       for fn in filenames
                       if os.path.splitext(fn)[1] in _ALL_TEMPLATE_EXTS]

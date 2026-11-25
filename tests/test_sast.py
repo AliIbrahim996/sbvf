@@ -482,6 +482,29 @@ class TestRepoURLs(unittest.TestCase):
             with self.assertRaises(RepoURLError):
                 normalize_repo_url(f"https://u:p@{host}/g/p")
 
+    def test_excludes_agent_worktrees(self):
+        import os, tempfile
+        from sbvf.sast.detect import iter_source_files
+        root = tempfile.mkdtemp(prefix="sbvf_prune_")
+        try:
+            def w(rel, text="x = 1\n"):
+                full = os.path.join(root, *rel.split("/"))
+                os.makedirs(os.path.dirname(full), exist_ok=True)
+                with open(full, "w", encoding="utf-8") as fh:
+                    fh.write(text)
+            w("app.py")                       # real source -> kept
+            w(".claude/agents/helper.py")     # agent config dir -> skipped by name
+            # An agent git worktree under an arbitrarily-named folder: a linked
+            # worktree carries a .git *file* at its root -> skipped as nested repo.
+            w("agent-run-7/.git", "gitdir: /somewhere/.git/worktrees/agent-run-7\n")
+            w("agent-run-7/leaked.py")
+            found = {os.path.relpath(f, root).replace("\\", "/")
+                     for f in iter_source_files(root)}
+            self.assertEqual(found, {"app.py"})
+        finally:
+            from sbvf.sast.repo import remove_tree
+            remove_tree(root)
+
     @unittest.skipUnless(os.environ.get("SBVF_NET_TESTS"), "set SBVF_NET_TESTS=1 for network tests")
     def test_real_github_clone(self):
         from sbvf.sast.repo import clone_repo, remove_tree

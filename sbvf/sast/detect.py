@@ -8,11 +8,14 @@ from typing import Dict, List, Tuple
 
 from .js import JS_EXT
 
-# Directories never worth scanning (third-party / build / vcs).
+# Directories never worth scanning (third-party / build / vcs / AI-agent scratch).
 SKIP_DIRS = {".git", "node_modules", "vendor", "__pycache__", ".venv", "venv",
              "env", "dist", "build", ".idea", ".vscode", "migrations",
              "bootstrap", "storage", ".next", ".nuxt", "coverage",
-             "bower_components"}
+             "bower_components",
+             # AI-agent config and worktree scratch -- not the app's own source.
+             ".claude", ".cursor", ".aider", ".github-copilot",
+             ".worktree", ".worktrees", ".git-worktrees"}
 
 PHP_EXT = (".php",)
 PY_EXT = (".py",)
@@ -38,13 +41,33 @@ def _wanted_js(root: str, dirpath: str, fn: str) -> bool:
         return False
 
 
+def prune_dirs(root: str, dirpath: str, dirnames: list) -> None:
+    """Drop (in place) subdirectories that shouldn't be scanned.
+
+    Removes :data:`SKIP_DIRS` by name, and any *nested* git checkout -- a linked
+    git worktree (as agents create) carries its own ``.git`` entry at its root,
+    so scanning it would re-scan an unrelated copy of the tree. The scan root
+    itself is never pruned, even when it is a worktree.
+    """
+    kept = []
+    for d in dirnames:
+        if d in SKIP_DIRS:
+            continue
+        full = os.path.join(dirpath, d)
+        if full != root and os.path.exists(os.path.join(full, ".git")):
+            continue                       # nested repo / agent worktree
+        kept.append(d)
+    dirnames[:] = kept
+
+
 def iter_source_files(root: str) -> List[str]:
     """Return absolute paths of PHP/Python/JS/TS source files under *root*."""
     files = []
     if os.path.isfile(root):
         return [root]
+    root = os.path.abspath(root)
     for dirpath, dirnames, filenames in os.walk(root):
-        dirnames[:] = [d for d in dirnames if d not in SKIP_DIRS]
+        prune_dirs(root, dirpath, dirnames)
         for fn in filenames:
             if fn.endswith(PHP_EXT) or fn.endswith(PY_EXT) or _wanted_js(root, dirpath, fn):
                 files.append(os.path.join(dirpath, fn))
@@ -131,9 +154,9 @@ def detect_frameworks(root: str, files: List[str]) -> Dict[str, str]:
 def _node_dependencies(root: str) -> set:
     """Dependency names from package.json files (root first, then sub-packages)."""
     deps = set()
-    base = root if os.path.isdir(root) else os.path.dirname(root)
+    base = os.path.abspath(root if os.path.isdir(root) else os.path.dirname(root))
     for dirpath, dirnames, filenames in os.walk(base):
-        dirnames[:] = [d for d in dirnames if d not in SKIP_DIRS]
+        prune_dirs(base, dirpath, dirnames)
         if dirpath[len(base):].count(os.sep) > 3:
             dirnames[:] = []
         if "package.json" in filenames:

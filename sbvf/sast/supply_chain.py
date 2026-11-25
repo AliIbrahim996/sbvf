@@ -25,7 +25,7 @@ import os
 import re
 from typing import Callable, List, Optional
 
-from .detect import SKIP_DIRS
+from .detect import prune_dirs
 from .model import Finding, Step
 
 # Manifest filenames we understand.
@@ -150,8 +150,9 @@ def iter_manifests(root: str) -> List[str]:
         base = os.path.basename(root)
         return [root] if base in _JSON_MANIFESTS or _REQ_RE.search(base) else []
     found: List[str] = []
+    root = os.path.abspath(root)
     for dirpath, dirnames, filenames in os.walk(root):
-        dirnames[:] = [d for d in dirnames if d not in SKIP_DIRS]
+        prune_dirs(root, dirpath, dirnames)
         for fn in filenames:
             if fn in _JSON_MANIFESTS or _REQ_RE.search(fn):
                 found.append(os.path.join(dirpath, fn))
