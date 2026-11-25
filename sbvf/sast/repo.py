@@ -122,21 +122,32 @@ def normalize_repo_url(text: str) -> str:
     return f"https://{host}/{'/'.join(segs)}.git"
 
 
-def clone_repo(url: str, timeout: int = 300) -> str:
+# A conservative git branch name: letters/digits and . _ / - only, no leading
+# dash (so it can't be read as a git option) and no "..".
+_BRANCH_RE = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9._/-]*$")
+
+
+def clone_repo(url: str, timeout: int = 300, all_branches: bool = False) -> str:
     """Shallow-clone an accepted repository URL into a new temp dir; return it.
 
     The caller owns the directory and should delete it with :func:`remove_tree`.
     Raises :class:`RepoURLError` for a rejected URL and ``RuntimeError`` if the
     clone fails (not found, private, network error, timeout).
+
+    With *all_branches* the clone fetches the shallow tip of **every** branch
+    (``--no-single-branch``) so :func:`list_branches` can offer them and
+    :func:`checkout_branch` can switch to one without another network round trip;
+    by default only the remote's default branch is fetched.
     """
     clean = normalize_repo_url(url)
     dest = tempfile.mkdtemp(prefix="sbvf_sast_")
     env = dict(os.environ, GIT_TERMINAL_PROMPT="0", GCM_INTERACTIVE="never",
                GIT_ASKPASS="echo", SSH_ASKPASS="echo")
+    branch_scope = "--no-single-branch" if all_branches else "--single-branch"
     cmd = ["git",
            "-c", "protocol.allow=never", "-c", "protocol.https.allow=always",
            "-c", "core.symlinks=false", "-c", "credential.helper=",
-           "clone", "--depth", "1", "--single-branch", "--no-tags",
+           "clone", "--depth", "1", branch_scope, "--no-tags",
            "--", clean, dest]
     try:
         subprocess.run(cmd, check=True, env=env, timeout=timeout,
@@ -155,6 +166,69 @@ def clone_repo(url: str, timeout: int = 300) -> str:
         remove_tree(dest)
         raise RuntimeError("git is not installed or not on PATH")
     return dest
+
+
+def _git(clone_dir: str, *args: str, timeout: int = 60):
+    """Run ``git -C clone_dir <args>`` non-interactively and return the result."""
+    env = dict(os.environ, GIT_TERMINAL_PROMPT="0", GCM_INTERACTIVE="never",
+               GIT_ASKPASS="echo", SSH_ASKPASS="echo")
+    return subprocess.run(["git", "-C", clone_dir, *args], check=True, env=env,
+                          timeout=timeout, stdin=subprocess.DEVNULL,
+                          stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+
+
+def list_branches(clone_dir: str):
+    """Return ``(branches, current)`` for a clone made with ``all_branches=True``.
+
+    *branches* is the de-duplicated list of branch names (the ``origin/`` prefix
+    stripped, ``HEAD`` dropped), *current* the checked-out branch. On any git
+    failure returns ``([], "")`` so the caller can fall back to the default branch.
+    """
+    try:
+        out = _git(clone_dir, "for-each-ref", "--format=%(refname:short)",
+                   "refs/remotes/origin")
+    except (subprocess.SubprocessError, OSError):
+        return [], ""
+    branches = []
+    for line in out.stdout.splitlines():
+        name = line.strip()
+        # Skip the remote's symbolic HEAD, which shows up as "origin" or
+        # "origin/HEAD" (and as "origin/HEAD -> origin/main" from `git branch -r`).
+        if not name or name == "origin" or name.endswith("/HEAD") or "->" in name:
+            continue
+        if name.startswith("origin/"):
+            name = name[len("origin/"):]
+        if name and name != "HEAD":
+            branches.append(name)
+    seen = set()
+    branches = [b for b in branches if not (b in seen or seen.add(b))]
+    try:
+        current = _git(clone_dir, "rev-parse", "--abbrev-ref", "HEAD").stdout.strip()
+    except (subprocess.SubprocessError, OSError):
+        current = ""
+    if current and current not in branches:
+        branches.insert(0, current)
+    return branches, current
+
+
+def checkout_branch(clone_dir: str, branch: str) -> None:
+    """Check out *branch* in *clone_dir*. Validates the name first.
+
+    Raises :class:`RepoURLError` for an unacceptable name and ``RuntimeError`` if
+    git cannot switch to it.
+    """
+    if not branch or ".." in branch or not _BRANCH_RE.match(branch):
+        raise RepoURLError(f"invalid branch name '{branch}'")
+    try:
+        _git(clone_dir, "checkout", branch, timeout=120)
+    except subprocess.TimeoutExpired:
+        raise RuntimeError(f"checking out branch '{branch}' timed out")
+    except subprocess.CalledProcessError as exc:
+        lines = [ln for ln in (exc.stderr or "").splitlines() if ln.strip()]
+        detail = lines[-1].strip() if lines else f"exit code {exc.returncode}"
+        raise RuntimeError(f"could not check out branch '{branch}' ({detail})")
+    except FileNotFoundError:
+        raise RuntimeError("git is not installed or not on PATH")
 
 
 def remove_tree(path: str) -> None:

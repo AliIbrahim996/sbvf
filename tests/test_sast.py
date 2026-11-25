@@ -505,6 +505,49 @@ class TestRepoURLs(unittest.TestCase):
             from sbvf.sast.repo import remove_tree
             remove_tree(root)
 
+    def test_list_and_checkout_branches(self):
+        import os, shutil, subprocess, tempfile
+        from sbvf.sast.repo import (list_branches, checkout_branch, remove_tree,
+                                    RepoURLError)
+        if not shutil.which("git"):
+            self.skipTest("git not installed")
+        base = tempfile.mkdtemp(prefix="sbvf_branch_")
+        src, clone = os.path.join(base, "src"), os.path.join(base, "clone")
+
+        def git(cwd, *args):
+            subprocess.run(["git", "-C", cwd, *args], check=True,
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+        try:
+            os.makedirs(src)
+            subprocess.run(["git", "init", "-q", src], check=True)
+            git(src, "config", "user.email", "t@t.t")
+            git(src, "config", "user.name", "t")
+            git(src, "symbolic-ref", "HEAD", "refs/heads/main")
+            with open(os.path.join(src, "a.py"), "w") as fh:
+                fh.write("x = 1\n")
+            git(src, "add", "-A"); git(src, "commit", "-q", "-m", "init")
+            git(src, "checkout", "-q", "-b", "feature")
+            with open(os.path.join(src, "feature_only.py"), "w") as fh:
+                fh.write("y = 2\n")
+            git(src, "add", "-A"); git(src, "commit", "-q", "-m", "feat")
+            git(src, "checkout", "-q", "main")
+            subprocess.run(["git", "clone", "-q", "--no-single-branch", src, clone],
+                           check=True)
+
+            branches, current = list_branches(clone)
+            self.assertEqual(current, "main")
+            self.assertEqual(set(branches), {"main", "feature"})   # no bogus "origin"
+
+            checkout_branch(clone, "feature")
+            self.assertTrue(os.path.isfile(os.path.join(clone, "feature_only.py")))
+
+            for bad in ("--evil", "", "a..b", "-x"):
+                with self.assertRaises(RepoURLError):
+                    checkout_branch(clone, bad)
+        finally:
+            remove_tree(base)
+
     @unittest.skipUnless(os.environ.get("SBVF_NET_TESTS"), "set SBVF_NET_TESTS=1 for network tests")
     def test_real_github_clone(self):
         from sbvf.sast.repo import clone_repo, remove_tree

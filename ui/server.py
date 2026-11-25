@@ -11,9 +11,12 @@ from __future__ import annotations
 import json
 import os
 import sys
+import threading
 import time
 import urllib.parse
+import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from queue import Empty, Queue
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
@@ -22,8 +25,8 @@ from sbvf import datasets                    # noqa: E402
 from sbvf.experiment import iter_runs, analyze, SPLITS  # noqa: E402
 from sbvf.sast import scan_path, extract_routes, confirm_findings, TargetUnreachable  # noqa: E402
 from sbvf.sast.repo import (                 # noqa: E402
-    allowed_hosts, RepoURLError, clone_repo, is_repo_url, normalize_repo_url,
-    remove_tree)
+    allowed_hosts, RepoURLError, checkout_branch, clone_repo, is_repo_url,
+    list_branches, normalize_repo_url, remove_tree)
 from sbvf import store                        # noqa: E402  (optional persistence)
 from testbed.launcher import start_all       # noqa: E402
 
@@ -58,6 +61,13 @@ UI_IS_LOCAL = UI_HOST in ("127.0.0.1", "localhost", "::1")
 
 HTML = open(os.path.join(os.path.dirname(__file__), "index.html"),
             encoding="utf-8").read()
+
+# Interactive branch selection for a cloned repo: the scan stream clones all
+# branch tips, emits a `branch_prompt`, then blocks until a `POST /api/scan/branch`
+# (handled on another thread by the ThreadingHTTPServer) hands back the choice.
+_PENDING_BRANCH: dict = {}
+_PENDING_LOCK = threading.Lock()
+BRANCH_SELECT_TIMEOUT = 300   # seconds to wait for the user's branch choice
 
 
 class UIHandler(BaseHTTPRequestHandler):
@@ -118,11 +128,29 @@ class UIHandler(BaseHTTPRequestHandler):
         path = parsed.path.rstrip("/")
         if path == "/api/ask":
             return self._ask()
+        if path == "/api/scan/branch":
+            return self._pick_branch()
         if path.startswith("/api/scans/") and path.endswith("/agents"):
             scan_id = path[len("/api/scans/"):-len("/agents")]
             return self._run_agents(scan_id)
         self.send_response(404)
         self.end_headers()
+
+    def _pick_branch(self):
+        """Resume a scan that is waiting for a branch choice (see ``_resolve_branch``)."""
+        body = self._read_json_body()
+        token = str(body.get("token", "") or "")
+        branch = str(body.get("branch", "") or "")
+        with _PENDING_LOCK:
+            entry = _PENDING_BRANCH.get(token)
+        if entry is None:
+            return self._json({"ok": False,
+                               "message": "unknown or expired branch selection"}, code=404)
+        if branch not in entry["branches"]:
+            return self._json({"ok": False,
+                               "message": "branch not offered for this scan"}, code=400)
+        entry["queue"].put(branch)
+        self._json({"ok": True, "branch": branch})
 
     def _read_json_body(self):
         try:
@@ -309,6 +337,10 @@ class UIHandler(BaseHTTPRequestHandler):
         sample = qs.get("sample", [""])[0]
         custom = qs.get("path", [""])[0].strip()
         confirm = qs.get("confirm", [""])[0].strip()   # optional live-confirm base URL
+        # Branch selection for a cloned repo: `branch_select=1` makes the stream
+        # pause and prompt; `branch=<name>` checks that branch out directly.
+        want_select = qs.get("branch_select", [""])[0].strip() in ("1", "true", "yes")
+        want_branch = qs.get("branch", [""])[0].strip()
 
         self.send_response(200)
         self.send_header("Content-Type", "text/event-stream")
@@ -321,6 +353,7 @@ class UIHandler(BaseHTTPRequestHandler):
                                     "data": step.data})
 
         clone_dir = None
+        branch_label = ""
         try:
             if custom and is_repo_url(custom):
                 try:
@@ -330,16 +363,21 @@ class UIHandler(BaseHTTPRequestHandler):
                     self._sse("scan_error", {"message": f"{exc}. Accepted: a local "
                                              f"folder or a {hosts} repository URL."})
                     return
+                all_branches = want_select or bool(want_branch)
                 self._sse("scan_step", {"kind": "clone", "text":
-                          f"Cloning {url} (shallow, depth 1) ...", "data": {"repo": url}})
+                          f"Cloning {url} (shallow, depth 1"
+                          f"{', all branches' if all_branches else ''}) ...",
+                          "data": {"repo": url}})
                 try:
-                    clone_dir = clone_repo(url)
+                    clone_dir = clone_repo(url, all_branches=all_branches)
                 except RuntimeError as exc:
                     self._sse("scan_error", {"message": str(exc)})
                     return
                 self._sse("scan_step", {"kind": "clone", "text":
-                          "Clone complete - starting static analysis "
-                          "(the clone is deleted afterwards)", "data": {}})
+                          "Clone complete (the clone is deleted afterwards)", "data": {}})
+                branch_label = self._resolve_branch(clone_dir, want_select, want_branch)
+                if branch_label is None:         # aborted; error already streamed
+                    return
                 target = clone_dir
             elif custom:
                 target = os.path.abspath(os.path.expanduser(custom))
@@ -354,7 +392,9 @@ class UIHandler(BaseHTTPRequestHandler):
             started = time.monotonic()
             result = scan_path(target, on_step=on_step)
             if clone_dir:
-                result["root"] = url
+                result["root"] = f"{url} @ {branch_label}" if branch_label else url
+                if branch_label:
+                    result["branch"] = branch_label
 
             # Optional live confirmation: drive the search against a running
             # instance of the app at a local base URL the user provides. This only
@@ -404,6 +444,60 @@ class UIHandler(BaseHTTPRequestHandler):
         finally:
             if clone_dir:
                 remove_tree(clone_dir)
+
+    def _resolve_branch(self, clone_dir, want_select, want_branch):
+        """Decide which branch of *clone_dir* to scan and check it out.
+
+        Returns the branch name (``""`` for "the clone's default branch, no
+        prompt"), or ``None`` after streaming a ``scan_error`` so the caller stops.
+        With *want_branch* the branch is used directly; with *want_select* the
+        stream emits a ``branch_prompt`` and blocks until ``_pick_branch`` resumes
+        it (or the wait times out).
+        """
+        if want_branch:
+            try:
+                checkout_branch(clone_dir, want_branch)
+            except (RepoURLError, RuntimeError) as exc:
+                self._sse("scan_error", {"message": str(exc)})
+                return None
+            self._sse("scan_step", {"kind": "clone", "data": {"branch": want_branch},
+                      "text": f"On branch '{want_branch}' - starting static analysis"})
+            return want_branch
+        if not want_select:
+            return ""                            # legacy / CLI: default branch
+
+        branches, current = list_branches(clone_dir)
+        if len(branches) <= 1:                   # nothing to choose
+            only = current or (branches[0] if branches else "")
+            self._sse("scan_step", {"kind": "clone", "data": {"branch": only},
+                      "text": f"Branch '{only}' - starting static analysis"})
+            return only
+
+        token = uuid.uuid4().hex
+        q: Queue = Queue()
+        with _PENDING_LOCK:
+            _PENDING_BRANCH[token] = {"queue": q, "branches": set(branches)}
+        self._sse("branch_prompt", {"token": token, "branches": branches,
+                                    "current": current})
+        try:
+            chosen = q.get(timeout=BRANCH_SELECT_TIMEOUT)
+        except Empty:
+            chosen = None
+        finally:
+            with _PENDING_LOCK:
+                _PENDING_BRANCH.pop(token, None)
+        if not chosen:
+            self._sse("scan_error", {"message": "Branch selection timed out - "
+                      "please scan again and choose a branch."})
+            return None
+        try:
+            checkout_branch(clone_dir, chosen)
+        except (RepoURLError, RuntimeError) as exc:
+            self._sse("scan_error", {"message": str(exc)})
+            return None
+        self._sse("scan_step", {"kind": "clone", "data": {"branch": chosen},
+                  "text": f"Checked out branch '{chosen}' - starting static analysis"})
+        return chosen
 
     def _local_target_error(self, target):
         """Return an error message if a local scan target is not acceptable."""

@@ -30,6 +30,9 @@ export default function ScanPage() {
   const [scanning, setScanning] = useState(false);
   const [stack, setStack] = useState("—");
   const [files, setFiles] = useState(0);
+  const [branchPrompt, setBranchPrompt] = useState<{ token: string; branches: string[]; current: string } | null>(null);
+  const [awaitingBranch, setAwaitingBranch] = useState(false);
+  const [chosenBranch, setChosenBranch] = useState("");
   const esRef = useRef<EventSource | null>(null);
   const logRef = useRef<HTMLDivElement | null>(null);
 
@@ -59,15 +62,30 @@ export default function ScanPage() {
     setResult(null);
     setStack("…");
     setFiles(0);
+    setBranchPrompt(null);
+    setAwaitingBranch(false);
+    setChosenBranch("");
     const live: Finding[] = [];
-    const remote = /^(https?:\/\/|git@|(www\.)?(github\.com|gitlab\.com|bitbucket\.org)\/)/i.test(path.trim());
+    const t = path.trim();
+    const remote = t.includes("://") || /^git@/i.test(t) || /^(www\.)?(github|gitlab|bitbucket)\./i.test(t);
     setStatus(remote ? "Cloning repository…" : "Scanning…");
     setPhase("live");
     setScanning(true);
-    let qs = path.trim() ? `path=${encodeURIComponent(path.trim())}` : `sample=${sample}`;
+    let qs = t ? `path=${encodeURIComponent(t)}` : `sample=${sample}`;
+    if (remote) qs += `&branch_select=1`;   // ask the backend to offer a branch list
     if (confirmUrl.trim()) qs += `&confirm=${encodeURIComponent(confirmUrl.trim())}`;
     const es = new EventSource(`/api/scan?${qs}`);
     esRef.current = es;
+
+    es.addEventListener("branch_prompt", (e) => {
+      const d = parse<{ token: string; branches: string[]; current: string }>(e);
+      if (!d) return;
+      setBranchPrompt(d);
+      setChosenBranch("");
+      setAwaitingBranch(true);
+      setStatus(`Choose a branch to scan (${d.branches.length} available)…`);
+      pushStep({ kind: "clone", text: `Repository has ${d.branches.length} branches — choose one to continue` });
+    });
 
     es.addEventListener("scan_step", (e) => {
       const d = parse<ScanStep>(e);
@@ -116,6 +134,28 @@ export default function ScanPage() {
     };
   }
 
+  // The moment a branch is chosen, resume the paused scan and lock the dropdown.
+  async function pickBranch(branch: string) {
+    if (!branchPrompt || !branch) return;
+    setChosenBranch(branch);
+    setAwaitingBranch(false);               // lock: no further editing
+    setStatus("Scanning…");
+    pushStep({ kind: "clone", text: `Branch selected: ${branch}` });
+    try {
+      const res = await fetch("/api/scan/branch", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ token: branchPrompt.token, branch }),
+      });
+      if (!res.ok) {
+        const d = await res.json().catch(() => ({}));
+        pushStep({ kind: "error", text: `could not select branch: ${d?.message || res.status}` });
+      }
+    } catch {
+      pushStep({ kind: "error", text: "could not send branch selection to the server" });
+    }
+  }
+
   const chipCls = phase === "live" ? "live" : phase === "done" ? "done" : phase === "err" ? "err" : "";
 
   return (
@@ -130,7 +170,7 @@ export default function ScanPage() {
       <div className="control">
         <div className="field">
           <label htmlFor="sample">Sample project</label>
-          <select id="sample" value={sample} onChange={(e) => setSample(e.target.value)}>
+          <select id="sample" value={sample} disabled={scanning} onChange={(e) => setSample(e.target.value)}>
             {SAMPLES.map((s) => (
               <option key={s.value} value={s.value}>
                 {s.label}
@@ -144,16 +184,39 @@ export default function ScanPage() {
             id="path"
             type="text"
             value={path}
+            disabled={scanning}
             onChange={(e) => setPath(e.target.value)}
             placeholder="/path/to/project  ·  C:\path\to\project  ·  https://github.com/owner/repo (overrides sample)"
           />
         </div>
+        {branchPrompt && (
+          <div className="field" style={{ minWidth: 200 }}>
+            <label htmlFor="branch">Branch{awaitingBranch ? "" : " (locked)"}</label>
+            <select
+              id="branch"
+              value={chosenBranch}
+              disabled={!awaitingBranch}
+              onChange={(e) => pickBranch(e.target.value)}
+            >
+              <option value="" disabled>
+                — choose branch —
+              </option>
+              {branchPrompt.branches.map((b) => (
+                <option key={b} value={b}>
+                  {b}
+                  {b === branchPrompt.current ? " (default)" : ""}
+                </option>
+              ))}
+            </select>
+          </div>
+        )}
         <div className="field" style={{ flex: 1, minWidth: 240 }}>
           <label htmlFor="confirm">Confirm live (optional) — URL of the running app</label>
           <input
             id="confirm"
             type="text"
             value={confirmUrl}
+            disabled={scanning}
             onChange={(e) => setConfirmUrl(e.target.value)}
             placeholder="http://127.0.0.1:8000 — localhost only; SBVF connects and replays requests"
           />
