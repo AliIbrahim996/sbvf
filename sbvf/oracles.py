@@ -160,6 +160,18 @@ class Oracle:
             r = self.target.get(self.path, {self.param: payload,
                                             "token": self.low_priv_token})
             return F.idor_fitness(r.body, r.status, self.low_priv_token)
+        if self.vuln == "missing_auth":
+            # Public-endpoint test: request the object with NO identity. The payload
+            # is a benign object id; _dispatch sends it at the configured site
+            # (query / path / body). Any session cookies are dropped for this one
+            # request so the result reflects a truly unauthenticated caller.
+            saved = self.target.cookies
+            self.target.cookies = {}
+            try:
+                r = self._dispatch(payload)
+            finally:
+                self.target.cookies = saved
+            return F.missing_auth_fitness(r.body, r.status)
         if self.vuln == "rbac":
             # Non-admin request plus an optional tampered key=value escalation vector.
             params = {"token": self.low_priv_token}

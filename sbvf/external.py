@@ -26,6 +26,7 @@ class ExternalEndpoint:
     path: str
     param: str
     vuln: str                 # "xss" | "sqli" | "command_injection" | "open_redirect"
+                              # | "idor" | "rbac" | "missing_auth" | "clickjacking"
     label: str = "unknown"    # "vulnerable" for documented points, else "unknown"
     note: str = ""
     extra: dict | None = None  # fixed extra query params (e.g. DVWA's Submit=Submit)

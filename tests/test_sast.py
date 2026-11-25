@@ -1041,18 +1041,20 @@ class TestIDOR(unittest.TestCase):
         self.assertEqual(d["cwe"], "CWE-639")
         self.assertTrue(d["impact"] and d["fix"] and d["how_in"])
 
-    def test_idor_is_static_only(self):
-        # IDOR cannot be auto-confirmed by the search (it needs two identities to
-        # prove cross-owner access), so it is reported statically, never handed to
-        # GA/CS/RS as an endpoint.
+    def test_idor_bridges_to_dynamic_endpoints(self):
+        # A routed IDOR finding is handed to the search two ways: as IDOR (enumerate
+        # object ids as a low-privilege user) and as a missing-authentication probe
+        # (is the same record served with no identity -> a public endpoint).
         with _project({
             "manage.py": "", "urls.py": "from django.urls import path\nfrom . import views\n"
             "urlpatterns=[path('orders/<int:oid>/', views.get_order)]\n",
             "views.py": "def get_order(request, oid):\n    return Order.objects.get(pk=oid)\n",
         }) as root:
             eps, skipped = derive_endpoints(scan_path(root)["findings"], routes=extract_routes(root))
-            self.assertEqual([e for e in eps if e.vuln == "idor"], [])
-            self.assertTrue(any(s["vuln"] == "idor" for s in skipped))
+            self.assertEqual(sorted({e.vuln for e in eps}), ["idor", "missing_auth"])
+            for e in eps:
+                self.assertEqual((e.where, e.param), ("path", "oid"))
+                self.assertEqual(e.path_template, "/orders/__SBVF__/")
 
 
 class TestIDORPrecision(unittest.TestCase):

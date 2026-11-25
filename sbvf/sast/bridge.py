@@ -14,13 +14,16 @@ and the search decides which are actually exploitable.
 
 Scope and honesty
 -----------------
-Only findings that can be mapped to an HTTP GET request are turned into dynamic
-targets, because the dynamic oracle confirms XSS/SQLi by injecting a GET query
-parameter:
+Only findings that can be mapped to an HTTP request are turned into dynamic
+targets, because the dynamic oracle confirms a vulnerability by actually sending a
+request and inspecting the response:
 
-* the vulnerability class must be ``xss`` or ``sqli`` (what the oracle checks);
-* the input must be a GET/REQUEST query parameter (POST bodies, cookies, headers
-  and URL *path* segments are reported statically but not auto-confirmed);
+* the vulnerability class must be one the oracle checks -- ``xss``, ``sqli``,
+  ``command_injection``, ``open_redirect`` or ``idor`` (each IDOR endpoint is also
+  probed for missing authentication, i.e. a public endpoint);
+* the input must be a recoverable request parameter -- a GET/REQUEST query
+  parameter, a URL *path* segment on a routed framework, or a POST body (cookies
+  and headers are reported statically but not auto-confirmed);
 * the route must be recoverable:
     - **native PHP** is file-routed: ``shop/item.php`` + ``$_GET['id']`` ->
       ``/shop/item.php?id=``;
@@ -42,8 +45,12 @@ from .routes import Route, RouteKey, lookup
 
 PATH_SENTINEL = "__SBVF__"       # must match sbvf.oracles.Oracle.PATH_SENTINEL
 
-# Vulnerability classes the dynamic oracle can confirm.
-DYNAMIC_VULNS = {"xss", "sqli", "command_injection", "open_redirect"}
+# Vulnerability classes the dynamic oracle can confirm. Besides the injection
+# classes, access-control findings are confirmable too: an IDOR endpoint is driven
+# by enumerating object ids as a low-privilege user, and every IDOR endpoint is also
+# probed for missing authentication (is the same sensitive data served with no
+# identity at all -> a public endpoint, CWE-306).
+DYNAMIC_VULNS = {"xss", "sqli", "command_injection", "open_redirect", "idor"}
 # Input methods the search can drive, mapped to (http method, injection site).
 INPUT_METHODS = {
     "GET": ("GET", "query"), "REQUEST": ("GET", "query"),
@@ -99,16 +106,30 @@ def derive_endpoints(findings: List[dict], strip_prefix: str = "",
         if reason:
             skipped.append({**f, "reason": reason})
             continue
-        key = (spec["path"], spec["path_template"], f["param"], f["vuln"], spec["where"])
-        if key in seen:
-            continue
-        seen.add(key)
-        endpoints.append(ExternalEndpoint(
-            path=spec["path"], param=f["param"], vuln=f["vuln"], label="sast",
-            note=f"{f['vuln']} at {f['location']} ({f['method']})",
-            method=spec["method"], where=spec["where"],
-            path_template=spec["path_template"]))
+        for vuln in _confirm_classes(f["vuln"]):
+            key = (spec["path"], spec["path_template"], f["param"], vuln, spec["where"])
+            if key in seen:
+                continue
+            seen.add(key)
+            note = (f"public-endpoint check for {f['location']}" if vuln == "missing_auth"
+                    else f"{vuln} at {f['location']} ({f['method']})")
+            endpoints.append(ExternalEndpoint(
+                path=spec["path"], param=f["param"], vuln=vuln, label="sast",
+                note=note, method=spec["method"], where=spec["where"],
+                path_template=spec["path_template"]))
     return endpoints, skipped
+
+
+def _confirm_classes(vuln: str) -> List[str]:
+    """Dynamic checks to run for a static finding of class *vuln*.
+
+    An IDOR endpoint is confirmed two ways: as IDOR (read another user's object as a
+    low-privilege user) and as a missing-authentication / public endpoint (the same
+    sensitive data served with no identity at all). Other classes map one-to-one.
+    """
+    if vuln == "idor":
+        return ["idor", "missing_auth"]
+    return [vuln]
 
 
 def _resolve(f: dict, strip_prefix: str, routes) -> Tuple[Optional[dict], Optional[str]]:

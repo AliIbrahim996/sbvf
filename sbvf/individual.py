@@ -81,6 +81,15 @@ GRAMMARS = {
                  "42", "100", "101", "1000", "1001", "1002", "9999"],
         "post": [""],
     },
+    # Missing authentication (public endpoint): the "payload" is an object id the
+    # framework requests with NO identity at all. If a sensitive record comes back
+    # unauthenticated, the endpoint is public. Same id space as IDOR.
+    "missing_auth": {
+        "pre": [""],
+        "core": ["1", "2", "3", "4", "5", "6", "7", "8", "9", "10",
+                 "42", "100", "101", "1000", "1001", "1002", "9999"],
+        "post": [""],
+    },
     # RBAC: the "payload" is a privilege-escalation vector (a tampered parameter) that a
     # non-admin user submits in an attempt to reach an admin-only action.
     "rbac": {

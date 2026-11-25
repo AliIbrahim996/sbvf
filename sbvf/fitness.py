@@ -152,6 +152,32 @@ def idor_fitness(body: str, status: int, my_token: str) -> tuple[float, bool]:
     return 0.2 if status == 200 else 0.0, False
 
 
+# Markers of a sensitive response body (same testbed vocabulary as the IDOR/RBAC
+# oracles): an owned record with a secret, a planted flag, or admin-only content.
+_SENSITIVE_RE = re.compile(r"owner=\w+|secret=|FLAG|ADMIN_ONLY", re.IGNORECASE)
+# Signals that the app is asking the caller to authenticate rather than serving data.
+_LOGIN_RE = re.compile(r"login required|please log in|sign in|unauthori[sz]ed", re.IGNORECASE)
+
+
+def missing_auth_fitness(body: str, status: int) -> tuple[float, bool]:
+    """Missing-authentication (public-endpoint, CWE-306) fitness.
+
+    The request carried NO identity. Confirmed when the endpoint still serves
+    sensitive data (an owned record / secret / admin-only content) with a 200 and
+    is not asking the caller to log in. A 401/403, a redirect to a login page, or a
+    "login required" body is the endpoint correctly refusing anonymous access.
+    """
+    if status in (401, 403):
+        return 0.0, False
+    if status in (301, 302, 303, 307, 308):
+        return 0.0, False                     # redirected (typically to a login page)
+    if status == 200 and _LOGIN_RE.search(body):
+        return 0.0, False                     # 200 but it is a login prompt, not data
+    if status == 200 and _SENSITIVE_RE.search(body):
+        return 1.0, True                      # sensitive data served with no auth -> public
+    return (0.2 if status == 200 else 0.0), False
+
+
 def rbac_fitness(body: str, status: int) -> tuple[float, bool]:
     """RBAC / broken-access-control fitness for a non-admin identity.
 
