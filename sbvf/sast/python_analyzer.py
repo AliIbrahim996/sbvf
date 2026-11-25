@@ -16,9 +16,11 @@ Approach (intra-procedural, flow-insensitive taint tracking):
    sink's ``file:line``.
 
 This is deliberately a lightweight prototype analyzer: it is intra-procedural
-(it does not follow taint across function-call boundaries) and flow-insensitive
-(a variable that becomes tainted stays tainted). These limitations are discussed
-in the thesis as threats to validity.
+(it does not follow taint across function-call boundaries). Taint propagation is
+flow-insensitive (a variable that becomes tainted stays tainted), but the sink
+pass is flow-sensitive for *killing* taint: a variable reassigned an
+unconditional clean value loses its taint downstream (improvement 4.4). These
+limitations are discussed in the thesis as threats to validity.
 """
 from __future__ import annotations
 
@@ -592,9 +594,94 @@ class PythonAnalyzer:
     # --- sink detection -----------------------------------------------------
 
     def _collect_sinks(self, body, scope, findings):
-        for node in self._scope_nodes(body):
-            if isinstance(node, ast.Call):
-                self._check_call(node, scope, findings)
+        """Flow-sensitive sink pass (improvement 4.4). Walk the statements in
+        order with a *live* taint set seeded from the fixpoint; a variable
+        reassigned a clean value is killed for the statements that follow, so
+        ``x = request.GET['q']; x = '5'; cur.execute(x)`` is no longer reported.
+        Nested blocks are entered with a copy and their taint is unioned back on
+        exit, so a kill buried in a conditional/loop body never leaks out (no
+        false negatives) while an unconditional reassignment does."""
+        saved_t, saved_s = scope.tainted, scope.sanitized
+        scope.tainted = dict(saved_t)
+        scope.sanitized = dict(saved_s)
+        try:
+            self._flow_block(body, scope, findings)
+        finally:
+            scope.tainted, scope.sanitized = saved_t, saved_s
+
+    def _flow_block(self, stmts, scope, findings):
+        for node in stmts:
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                continue                                  # separate scope
+            # 1) sinks in this statement's own expressions (not nested blocks),
+            #    evaluated before the statement's own reassignment takes effect.
+            for call in self._stmt_calls(node):
+                self._check_call(call, scope, findings)
+            # 2) apply this statement's taint gen/kill to the live state.
+            self._apply_flow_assign(node, scope)
+            # 3) recurse into nested blocks with copies; union gens back on exit.
+            subs = self._sub_blocks(node)
+            if subs:
+                base_t, base_s = scope.tainted, scope.sanitized
+                for block in subs:
+                    scope.tainted, scope.sanitized = dict(base_t), dict(base_s)
+                    self._flow_block(block, scope, findings)
+                    base_t.update(scope.tainted)          # keep gens, drop kills
+                    base_s.update(scope.sanitized)
+                scope.tainted, scope.sanitized = base_t, base_s
+
+    def _stmt_calls(self, node):
+        """Every Call in *node*'s own expressions, not descending into the nested
+        statement blocks (those are walked separately by _flow_block)."""
+        calls = []
+        for field, value in ast.iter_fields(node):
+            if field in ("body", "orelse", "finalbody", "handlers"):
+                continue
+            for item in (value if isinstance(value, list) else [value]):
+                if isinstance(item, ast.AST):
+                    calls.extend(n for n in ast.walk(item) if isinstance(n, ast.Call))
+        return calls
+
+    def _sub_blocks(self, node):
+        """The nested statement lists of *node* (if/for/while/with/try bodies)."""
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda)):
+            return []
+        blocks = []
+        for field in ("body", "orelse", "finalbody"):
+            v = getattr(node, field, None)
+            if isinstance(v, list) and v and all(isinstance(x, ast.stmt) for x in v):
+                blocks.append(v)
+        for h in getattr(node, "handlers", []) or []:
+            if getattr(h, "body", None):
+                blocks.append(h.body)
+        return blocks
+
+    def _apply_flow_assign(self, node, scope):
+        """Update the live taint set for an assignment: (re)taint a target from a
+        tainted value, or kill it on a clean (re)assignment."""
+        def gen_kill(targets, value, allow_kill=True):
+            src, san = scope.taint_san(value)
+            for t in targets:
+                for name in self._target_names(t):
+                    if src:
+                        scope.tainted[name] = src
+                        scope.sanitized[name] = san
+                    elif allow_kill:
+                        scope.tainted.pop(name, None)
+                        scope.sanitized.pop(name, None)
+
+        if isinstance(node, ast.Assign):
+            for t in node.targets:
+                for targets, value in self._pair(t, node.value):
+                    gen_kill(targets, value)
+        elif isinstance(node, ast.AnnAssign) and node.value is not None:
+            gen_kill([node.target], node.value)
+        elif isinstance(node, ast.AugAssign):
+            # x += value accumulates; a tainted RHS taints x but a clean RHS does
+            # not wipe the existing value, so never kill here.
+            gen_kill([node.target], node.value, allow_kill=False)
+        elif isinstance(node, (ast.For, ast.AsyncFor)):
+            gen_kill([node.target], node.iter)
 
     def _check_call(self, node, scope, findings):
         fname = _name_of(node.func)
