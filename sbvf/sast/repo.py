@@ -76,6 +76,20 @@ def allowed_hosts() -> dict:
     return {**ALLOWED_HOSTS, **_extra_hosts()}
 
 
+# Userinfo (``user:token@``) that git may echo back inside a URL in its stderr.
+_CREDS_RE = re.compile(r"(?i)(https?://)[^/@\s]+@")
+
+
+def scrub_credentials(text: str) -> str:
+    """Strip any ``user:token@`` userinfo from URLs in *text*.
+
+    Git error output can echo the authenticated clone URL, which would leak the
+    token into the SSE stream, the dashboard and the database. Replace the
+    userinfo with ``***@`` so nothing sensitive is surfaced or stored.
+    """
+    return _CREDS_RE.sub(r"\1***@", text or "")
+
+
 def _wants_credentials(host: str) -> bool:
     """Whether a clone of *host* may use the machine's git credentials.
 
@@ -93,6 +107,19 @@ def _wants_credentials(host: str) -> bool:
     if h.startswith("www."):
         h = h[4:]
     return h in _extra_hosts()
+
+
+def uses_credentials(url: str) -> bool:
+    """Whether cloning *url* will use the machine's git credential helper.
+
+    Lets the UI surface a visible "using your git credentials" step. Returns
+    ``False`` for a URL that does not validate rather than raising.
+    """
+    try:
+        host = (urllib.parse.urlparse(normalize_repo_url(url)).hostname or "").lower()
+    except RepoURLError:
+        return False
+    return _wants_credentials(host)
 
 
 def is_repo_url(text: str) -> bool:
@@ -193,7 +220,8 @@ def clone_repo(url: str, timeout: int = 300, all_branches: bool = False) -> str:
     except subprocess.CalledProcessError as exc:
         remove_tree(dest)
         lines = [ln for ln in (exc.stderr or "").splitlines() if ln.strip()]
-        detail = lines[-1].strip() if lines else f"exit code {exc.returncode}"
+        detail = scrub_credentials(lines[-1].strip() if lines
+                                   else f"exit code {exc.returncode}")
         hint = ("Check that your git credential helper has access to it."
                 if use_creds else
                 "Is the repository public? For a private repo set "

@@ -464,7 +464,7 @@ function renderFindings(list){
     host.appendChild(card);
   });
 }
-el("scan").onclick=()=>{
+el("scan").onclick=async ()=>{
   if(ses) ses.close();
   sFindings=[]; lastScan=null; el("pdf").disabled=true;
   el("slog").innerHTML=""; el("s-files").textContent="0"; el("s-total").textContent="0";
@@ -473,8 +473,22 @@ el("scan").onclick=()=>{
   const sample=el("sample").value, path=el("scanpath").value.trim();
   const remote=/^(https?:\/\/|git@|(www\.)?(github\.com|gitlab\.com|bitbucket\.org)\/)/i.test(path);
   el("scan").disabled=true; el("s-msg").textContent=remote?"Cloning repository…":"Scanning…";
-  const q=path?`path=${encodeURIComponent(path)}`:`sample=${sample}`;
-  ses=new EventSource(`/api/scan?${q}`);
+  // Start with a same-origin POST, then stream over SSE. The POST (JSON body) is
+  // what stops a cross-site GET from starting a scan — see ui/server.py `_guard`.
+  const payload=path?{path}:{sample};
+  let eventsUrl;
+  try{
+    const res=await fetch("/api/scans",{method:"POST",
+      headers:{"Content-Type":"application/json"},body:JSON.stringify(payload)});
+    if(!res.ok){const d=await res.json().catch(()=>({}));
+      throw new Error(d.message||("could not start scan ("+res.status+")"));}
+    const d=await res.json(); eventsUrl=d.events_url||("/api/scans/"+d.scan_id+"/events");
+  }catch(err){
+    slog("error",err.message||"could not start scan");
+    el("s-count").textContent="0 vulnerabilities";
+    el("s-msg").textContent="Error"; el("scan").disabled=false; return;
+  }
+  ses=new EventSource(eventsUrl);
   ses.addEventListener("scan_step",e=>{
     const d=JSON.parse(e.data);
     slog(d.kind,d.text);
