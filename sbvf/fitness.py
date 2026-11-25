@@ -163,18 +163,22 @@ def missing_auth_fitness(body: str, status: int) -> tuple[float, bool]:
     """Missing-authentication (public-endpoint, CWE-306) fitness.
 
     The request carried NO identity. Confirmed when the endpoint still serves
-    sensitive data (an owned record / secret / admin-only content) with a 200 and
-    is not asking the caller to log in. A 401/403, a redirect to a login page, or a
-    "login required" body is the endpoint correctly refusing anonymous access.
+    sensitive data (an owned record / secret / admin-only content) with a 200. A
+    401/403, a redirect to a login page, or a "login required" body is the endpoint
+    correctly refusing anonymous access.
+
+    Sensitive data served with a 200 means the endpoint is public, so that check
+    comes first: a page that both leaks a record and carries an incidental "sign in"
+    nav link is still a public endpoint, not a login prompt.
     """
+    if status == 200 and _SENSITIVE_RE.search(body):
+        return 1.0, True                      # sensitive data served with no auth -> public
     if status in (401, 403):
         return 0.0, False
     if status in (301, 302, 303, 307, 308):
         return 0.0, False                     # redirected (typically to a login page)
     if status == 200 and _LOGIN_RE.search(body):
         return 0.0, False                     # 200 but it is a login prompt, not data
-    if status == 200 and _SENSITIVE_RE.search(body):
-        return 1.0, True                      # sensitive data served with no auth -> public
     return (0.2 if status == 200 else 0.0), False
 
 

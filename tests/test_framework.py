@@ -116,6 +116,13 @@ class TestFitness(unittest.TestCase):
         fit, conf = fitness.missing_auth_fitness("<p>home</p>", 200)
         self.assertFalse(conf)
 
+    def test_missing_auth_sensitive_data_wins_over_nav_login_link(self):
+        # Data served with no auth is public even if the page has a 'Sign in' nav link.
+        body = "<nav><a href='/login'>Sign in</a></nav><p>owner=u2 secret=x</p>"
+        fit, conf = fitness.missing_auth_fitness(body, 200)
+        self.assertEqual(fit, 1.0)
+        self.assertTrue(conf)
+
 
 class TestStats(unittest.TestCase):
     def test_a12_symmetry(self):

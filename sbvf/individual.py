@@ -14,6 +14,12 @@ from dataclasses import dataclass, field
 # ---------------------------------------------------------------------------
 # Grammar per vulnerability type. Each gene is an index into one of these lists.
 # ---------------------------------------------------------------------------
+# Object-id space enumerated by the access-control grammars (IDOR and the
+# missing-authentication / public-endpoint probe). Low ids are sequential; high
+# ids are sparse so they require enumeration rather than a trivial +1 guess.
+_OBJECT_IDS = ["1", "2", "3", "4", "5", "6", "7", "8", "9", "10",
+               "42", "100", "101", "1000", "1001", "1002", "9999"]
+
 GRAMMARS = {
     "xss": {
         "pre":  ["", '"', "'", ">", '">', "'>", "</title>", "</textarea>",
@@ -75,19 +81,17 @@ GRAMMARS = {
     "clickjacking": {"pre": [""], "core": [""], "post": [""]},
     # IDOR: the "payload" is an object identifier the low-privilege user tries to read.
     # The search enumerates the id space looking for one that belongs to another owner.
+    # Missing authentication (public endpoint) enumerates the same id space, but the
+    # oracle requests each id with NO identity at all; a sensitive record coming back
+    # unauthenticated means the endpoint is public.
     "idor": {
         "pre": [""],
-        "core": ["1", "2", "3", "4", "5", "6", "7", "8", "9", "10",
-                 "42", "100", "101", "1000", "1001", "1002", "9999"],
+        "core": _OBJECT_IDS,
         "post": [""],
     },
-    # Missing authentication (public endpoint): the "payload" is an object id the
-    # framework requests with NO identity at all. If a sensitive record comes back
-    # unauthenticated, the endpoint is public. Same id space as IDOR.
     "missing_auth": {
         "pre": [""],
-        "core": ["1", "2", "3", "4", "5", "6", "7", "8", "9", "10",
-                 "42", "100", "101", "1000", "1001", "1002", "9999"],
+        "core": _OBJECT_IDS,
         "post": [""],
     },
     # RBAC: the "payload" is a privilege-escalation vector (a tampered parameter) that a
