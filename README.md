@@ -403,3 +403,26 @@ measure "no regressions on known cases", not generalisation — the harness is m
 to be re-run on larger external corpora. Rule-based samples (crypto, deserialization,
 misconfiguration, error handling, supply chain) use section headers rather than
 per-line markers and are reported separately by the tool.
+
+### Third-party benchmark (independent apps)
+
+Because the corpus above is self-labelled, a second harness scans **real,
+third-party vulnerable apps** at a pinned commit and reports how many of each app's
+*documented* vulnerability classes SBVF recovers:
+
+```bash
+py -3.12 -m sbvf.sast.thirdparty_benchmark            # clones + scans each app
+py -3.12 -m sbvf.sast.thirdparty_benchmark --only dsvw --json out.json
+```
+
+Latest run (see [`benchmarks/thirdparty-results.md`](benchmarks/thirdparty-results.md)):
+
+| App | Stack | Documented classes | Found | Recall |
+|---|---|---|---|---|
+| [DVNA](https://github.com/appsecco/dvna) | Node / Express + EJS | 5 | 5 | 1.00 |
+| [DSVW](https://github.com/stamparm/DSVW) | Python | 6 | 6 | 1.00 |
+
+Recall is over each app's **documented** classes; **precision is not claimed** on
+these apps (their code is not exhaustively labelled, so an unlabelled finding may be
+a real undocumented bug, not a false positive). The harness clones each app, so it
+needs network and is not run in CI. DVWA and Juice Shop are planned additions.

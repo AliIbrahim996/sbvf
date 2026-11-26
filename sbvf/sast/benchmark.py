@@ -165,22 +165,27 @@ def _print(report: Dict) -> None:
 
 
 def main(argv=None) -> int:
-    argv = list(sys.argv[1:] if argv is None else argv)
-    out_json = None
-    if "--json" in argv:
-        i = argv.index("--json")
-        out_json = argv[i + 1]
-        del argv[i:i + 2]
-    samples_dir = argv[0] if argv else os.path.join(
+    import argparse
+    default_dir = os.path.join(
         os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
         "testbed", "sast_samples")
-    report = run(samples_dir)
+    ap = argparse.ArgumentParser(
+        prog="python -m sbvf.sast.benchmark",
+        description="Precision/recall benchmark for the static analyzer over the "
+                    "labelled testbed (ground truth from inline VULN: markers).")
+    ap.add_argument("samples_dir", nargs="?", default=default_dir,
+                    help="directory of sample sub-projects to score "
+                         "(default: the bundled testbed/sast_samples)")
+    ap.add_argument("--json", metavar="OUT", help="also write the full report as JSON")
+    args = ap.parse_args(argv)
+
+    report = run(args.samples_dir)
     _print(report)
-    if out_json:
-        os.makedirs(os.path.dirname(out_json) or ".", exist_ok=True)
-        with open(out_json, "w", encoding="utf-8") as fh:
+    if args.json:
+        os.makedirs(os.path.dirname(args.json) or ".", exist_ok=True)
+        with open(args.json, "w", encoding="utf-8") as fh:
             json.dump(report, fh, indent=2)
-        print(f"\nreport written to {out_json}")
+        print(f"\nreport written to {args.json}")
     return 0
 
 
