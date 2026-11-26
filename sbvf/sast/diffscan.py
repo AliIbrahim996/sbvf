@@ -29,8 +29,7 @@ import re
 import subprocess
 from typing import Dict, Optional, Set
 
-from .engine import _counts  # reuse the single counts implementation
-from .model import Finding
+from .engine import counts_of_dicts  # reuse the single counts implementation
 
 # A hunk header: @@ -oldStart[,oldLen] +newStart[,newLen] @@
 _HUNK = re.compile(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@")
@@ -130,9 +129,7 @@ def filter_result(result: Dict, changed: Dict[str, Set[int]], *, by: str = "line
 
     out = dict(result)
     out["findings"] = kept
-    # Rebuild counts from the kept findings via the engine's own helper (it reads
-    # .vuln / .severity, so wrap each dict back into a lightweight Finding view).
-    out["counts"] = _counts([_as_finding(d) for d in kept])
+    out["counts"] = counts_of_dicts(kept)
     out["diff"] = {
         "base_changed_files": len(changed),
         "total_findings": len(findings),
@@ -141,11 +138,3 @@ def filter_result(result: Dict, changed: Dict[str, Set[int]], *, by: str = "line
         "mode": by,
     }
     return out
-
-
-def _as_finding(d: Dict) -> Finding:
-    """Minimal Finding from a serialized dict so ``_counts`` can read vuln/severity."""
-    return Finding(
-        vuln=d.get("vuln", ""), file=d.get("file", ""), line=int(d.get("line", 0) or 0),
-        sink=d.get("sink", ""), source=d.get("source", ""),
-        framework=d.get("framework", ""))

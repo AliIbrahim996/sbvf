@@ -7,6 +7,7 @@ Each test scans a bundled intentionally-vulnerable sample and asserts that:
 
 Runnable with pytest or `python -m tests.test_sast`.
 """
+import json
 import os
 import socket
 import subprocess
@@ -2398,6 +2399,87 @@ class TestDiffScan(unittest.TestCase):
                            capture_output=True, text=True)
             with self.assertRaises(RuntimeError):
                 git_diff(d, "nonexistent-ref-xyz")
+
+
+class TestBaseline(unittest.TestCase):
+    """Baseline suppression reports only findings new since a snapshot (7.3)."""
+
+    def _result(self, findings):
+        return {"files_scanned": 1, "frameworks": {}, "findings": findings, "counts": {}}
+
+    def test_write_load_roundtrip(self):
+        from sbvf.sast.baseline import write_baseline, load_baseline, build_baseline
+        res = self._result([
+            {"vuln": "sqli", "file": "a.php", "line": 9, "source": "$_GET",
+             "sink": "mysqli_query", "code": "q($_GET[id])", "severity": "high"},
+        ])
+        with tempfile.TemporaryDirectory() as d:
+            p = os.path.join(d, "b.json")
+            n = write_baseline(res, p)
+            self.assertEqual(n, 1)
+            keys = load_baseline(p)
+            self.assertEqual(keys, set(build_baseline(res)["fingerprints"].keys()))
+
+    def test_apply_suppresses_known_reports_new(self):
+        from sbvf.sast.baseline import build_baseline, apply_baseline
+        known = {"vuln": "sqli", "file": "a.php", "line": 9, "source": "$_GET",
+                 "sink": "mysqli_query", "code": "q($_GET[id])", "severity": "high"}
+        new = {"vuln": "xss", "file": "a.php", "line": 20, "source": "$_GET",
+               "sink": "echo", "code": "echo $_GET[x]", "severity": "high"}
+        base_keys = set(build_baseline(self._result([known]))["fingerprints"].keys())
+        out = apply_baseline(self._result([known, new]), base_keys)
+        self.assertEqual([f["vuln"] for f in out["findings"]], ["xss"])
+        self.assertEqual(out["baseline"]["new_findings"], 1)
+        self.assertEqual(out["baseline"]["suppressed"], 1)
+        self.assertEqual(out["counts"]["by_severity"]["high"], 1)
+
+    def test_fingerprint_is_line_independent(self):
+        # A known finding that only moved lines stays suppressed.
+        from sbvf.sast.baseline import build_baseline, apply_baseline
+        f = {"vuln": "sqli", "file": "a.php", "line": 9, "source": "$_GET",
+             "sink": "mysqli_query", "code": "q($_GET[id])", "severity": "high"}
+        base_keys = set(build_baseline(self._result([f]))["fingerprints"].keys())
+        moved = dict(f, line=42)
+        out = apply_baseline(self._result([moved]), base_keys)
+        self.assertEqual(out["findings"], [])
+        self.assertEqual(out["baseline"]["suppressed"], 1)
+
+    def test_empty_baseline_reports_everything(self):
+        from sbvf.sast.baseline import apply_baseline
+        res = self._result([{"vuln": "sqli", "file": "a.php", "line": 9,
+                             "source": "s", "sink": "k", "code": "c", "severity": "high"}])
+        out = apply_baseline(res, set())
+        self.assertEqual(len(out["findings"]), 1)
+        self.assertEqual(out["baseline"]["new_findings"], 1)
+
+    def test_load_rejects_non_baseline_file(self):
+        from sbvf.sast.baseline import load_baseline
+        with tempfile.TemporaryDirectory() as d:
+            p = os.path.join(d, "x.json")
+            with open(p, "w") as fh:
+                json.dump({"something": "else"}, fh)
+            with self.assertRaises(ValueError):
+                load_baseline(p)
+
+    def test_identity_matches_sarif_fingerprint(self):
+        # baseline and SARIF must agree on finding identity
+        from sbvf.sast.baseline import build_baseline
+        from sbvf.sast.sarif import finding_fingerprint
+        f = {"vuln": "sqli", "file": "a.php", "line": 9, "source": "$_GET",
+             "sink": "mysqli_query", "code": "q($_GET[id])", "severity": "high"}
+        key = next(iter(build_baseline(self._result([f]))["fingerprints"]))
+        self.assertEqual(key, finding_fingerprint(f))
+
+    def test_real_scan_baseline_suppresses_all_on_rescan(self):
+        # Writing a baseline from a sample then re-applying it to the same scan
+        # must suppress every finding (nothing new).
+        from sbvf.sast.baseline import build_baseline, apply_baseline
+        res = scan_path(os.path.join(SAMPLES, "php_native"))
+        self.assertTrue(res["findings"])
+        keys = set(build_baseline(res)["fingerprints"].keys())
+        out = apply_baseline(res, keys)
+        self.assertEqual(out["findings"], [])
+        self.assertEqual(out["baseline"]["suppressed"], len(res["findings"]))
 
 
 if __name__ == "__main__":

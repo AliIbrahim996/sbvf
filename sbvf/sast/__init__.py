@@ -19,9 +19,11 @@ from .engine import scan_path, Scanner
 from .bridge import derive_endpoints
 from .routes import extract_routes
 from .confirm import confirm_findings, TargetUnreachable
-from .sarif import to_sarif
+from .sarif import to_sarif, finding_fingerprint
 from .diffscan import changed_lines, filter_result
+from .baseline import build_baseline, write_baseline, load_baseline, apply_baseline
 
 __all__ = ["Finding", "VULN_INFO", "scan_path", "Scanner", "derive_endpoints",
            "extract_routes", "confirm_findings", "TargetUnreachable", "to_sarif",
-           "changed_lines", "filter_result"]
+           "finding_fingerprint", "changed_lines", "filter_result",
+           "build_baseline", "write_baseline", "load_baseline", "apply_baseline"]

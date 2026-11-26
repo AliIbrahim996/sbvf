@@ -194,6 +194,29 @@ remote repository URLs. Its one blind spot is a change that introduces a
 vulnerability whose sink sits on an untouched line; comparing the whole finding
 set by fingerprint (baseline mode) is the complementary approach for that.
 
+#### Baseline mode (report only findings new since a snapshot)
+
+`--write-baseline FILE` snapshots the current findings; `--baseline FILE` then
+reports only findings **not** in that snapshot — the backlog is silenced and only
+regressions surface. Unlike diff mode, the identity is a content fingerprint
+(vuln + file + source + sink + code, independent of line number), so a known
+finding stays suppressed even after edits move it, while a newly introduced
+vulnerability is flagged wherever its sink lands.
+
+```bash
+# once, on a known-good commit
+python -m sbvf.scan_code . --write-baseline .sbvf-baseline.json
+
+# thereafter (commit the baseline file): only new findings are reported
+python -m sbvf.scan_code . --baseline .sbvf-baseline.json --sarif pr.sarif
+```
+
+The fingerprint is the same one SARIF emits as `partialFingerprint`, so code
+scanning and the baseline agree on what "the same finding" is. Baseline and diff
+mode compose: `--baseline b.json --diff origin/main` reports findings that are
+both new since the baseline and on changed lines. The exit code still reflects
+the findings that remain after filtering, so CI gates on regressions only.
+
 The target is **either a local folder or a remote repository URL**. Remote
 repositories must be public and hosted on **GitHub, GitLab or Bitbucket**
 (`https://` only; other hosts, SSH, credentials and ports are rejected). They
