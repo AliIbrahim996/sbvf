@@ -468,13 +468,16 @@ class TestDeriveEndpoints(unittest.TestCase):
         skip_classes = {s["vuln"] for s in skipped}
         self.assertEqual(skip_classes, {"code_injection", "file_inclusion"})
 
-    def test_framework_routes_are_static_only(self):
+    def test_framework_routes_static_only_without_route(self):
+        # Laravel is now a routed framework (4.5): a controller finding is only
+        # confirmable when its route can be recovered. With no routes table and no
+        # recoverable handler, it stays static-only.
         findings = [{"vuln": "sqli", "file": "app/Http/Controllers/X.php",
                      "framework": "laravel", "method": "GET", "param": "id",
-                     "location": "app/Http/Controllers/X.php:10"}]
+                     "function": "show", "location": "app/Http/Controllers/X.php:10"}]
         eps, skipped = derive_endpoints(findings)
         self.assertEqual(eps, [])
-        self.assertIn("not file-based", skipped[0]["reason"])
+        self.assertIn("no URL route found", skipped[0]["reason"])
 
     def test_web_root_strip(self):
         findings = [{"vuln": "xss", "file": "public/search.php",
@@ -482,6 +485,35 @@ class TestDeriveEndpoints(unittest.TestCase):
                      "location": "public/search.php:3"}]
         eps, _ = derive_endpoints(findings, strip_prefix="public")
         self.assertEqual(eps[0].path, "/search.php")
+
+
+class TestLaravelRoutes(unittest.TestCase):
+    """Improvement 4.5: Laravel route recovery (routes/web.php) + request-param
+    recovery from $request accessors turn controller findings into endpoints."""
+
+    def setUp(self):
+        self.root = os.path.join(SAMPLES, "php_laravel")
+        self.r = scan_path(self.root)
+
+    def test_controller_finding_has_function_and_param(self):
+        # the SQLi in UserController::show() carries its method name and the
+        # request parameter recovered from $request->input('name').
+        sqli = [f for f in self.r["findings"]
+                if f["vuln"] == "sqli" and f.get("function") == "show"]
+        self.assertTrue(sqli)
+        self.assertEqual(sqli[0]["param"], "name")
+
+    def test_routes_extracted(self):
+        routes = extract_routes(self.root)
+        paths = {r.path for lst in routes.values() for r in lst}
+        self.assertIn("/users", paths)
+
+    def test_findings_become_endpoints(self):
+        routes = extract_routes(self.root)
+        eps, _ = derive_endpoints(self.r["findings"], routes=routes)
+        got = {(e.path, e.param, e.vuln) for e in eps}
+        self.assertIn(("/users", "name", "sqli"), got)
+        self.assertIn(("/users", "host", "command_injection"), got)
 
     def test_dedup(self):
         f = {"vuln": "sqli", "file": "a.php", "framework": "php-native",
