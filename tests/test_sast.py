@@ -2236,5 +2236,169 @@ class TestSarif(unittest.TestCase):
             with_col["locations"][0]["physicalLocation"]["region"]["startColumn"], 5)
 
 
+class TestDiffScan(unittest.TestCase):
+    """Diff-aware reporting keeps only findings on changed lines (improvement 7.2)."""
+
+    def test_changed_lines_parses_added_lines(self):
+        from sbvf.sast.diffscan import changed_lines
+        diff = (
+            "diff --git a/app.py b/app.py\n"
+            "--- a/app.py\n"
+            "+++ b/app.py\n"
+            "@@ -10,0 +11,2 @@\n"
+            "+added one\n"
+            "+added two\n"
+            "@@ -20 +22 @@\n"
+            "-old\n"
+            "+changed\n"
+        )
+        self.assertEqual(changed_lines(diff), {"app.py": {11, 12, 22}})
+
+    def test_changed_lines_context_advances_counter(self):
+        from sbvf.sast.diffscan import changed_lines
+        diff = (
+            "+++ b/x.php\n"
+            "@@ -1,3 +1,4 @@\n"
+            " ctx1\n"            # new line 1
+            "+inserted\n"        # new line 2
+            " ctx2\n"            # new line 3
+            " ctx3\n"            # new line 4
+        )
+        self.assertEqual(changed_lines(diff), {"x.php": {2}})
+
+    def test_changed_lines_body_line_lookalike_header(self):
+        # An added line whose CONTENT starts with "++ " / "-- " must be counted as a
+        # body line, not misread as a file header (regression).
+        from sbvf.sast.diffscan import changed_lines
+        diff = (
+            "diff --git a/n.md b/n.md\n"
+            "--- a/n.md\n"
+            "+++ b/n.md\n"
+            "@@ -1,0 +1,2 @@\n"
+            "++ a markdown line that starts with plus-plus\n"
+            "+normal added line\n"
+        )
+        self.assertEqual(changed_lines(diff), {"n.md": {1, 2}})
+
+    def test_changed_lines_two_files(self):
+        from sbvf.sast.diffscan import changed_lines
+        diff = (
+            "diff --git a/one.py b/one.py\n--- a/one.py\n+++ b/one.py\n"
+            "@@ -0,0 +1 @@\n+x\n"
+            "diff --git a/two.py b/two.py\n--- a/two.py\n+++ b/two.py\n"
+            "@@ -0,0 +5 @@\n+y\n"
+        )
+        self.assertEqual(changed_lines(diff), {"one.py": {1}, "two.py": {5}})
+
+    def test_changed_lines_ignores_deleted_file(self):
+        from sbvf.sast.diffscan import changed_lines
+        diff = ("--- a/gone.py\n+++ /dev/null\n@@ -1,2 +0,0 @@\n-a\n-b\n")
+        self.assertEqual(changed_lines(diff), {})
+
+    def test_filter_result_by_line(self):
+        from sbvf.sast.diffscan import filter_result
+        result = {
+            "files_scanned": 1, "frameworks": {},
+            "findings": [
+                {"vuln": "sqli", "file": "a.php", "line": 11, "severity": "high"},
+                {"vuln": "xss", "file": "a.php", "line": 99, "severity": "high"},
+                {"vuln": "sqli", "file": "b.php", "line": 11, "severity": "high"},
+            ],
+            "counts": {},
+        }
+        out = filter_result(result, {"a.php": {11, 12}}, by="line")
+        self.assertEqual([(f["file"], f["line"]) for f in out["findings"]], [("a.php", 11)])
+        self.assertEqual(out["diff"]["reported_findings"], 1)
+        self.assertEqual(out["diff"]["suppressed"], 2)
+        self.assertEqual(out["counts"]["by_severity"]["high"], 1)
+
+    def test_filter_result_by_file(self):
+        from sbvf.sast.diffscan import filter_result
+        result = {"findings": [
+            {"vuln": "sqli", "file": "a.php", "line": 11, "severity": "high"},
+            {"vuln": "xss", "file": "a.php", "line": 99, "severity": "high"},
+            {"vuln": "sqli", "file": "b.php", "line": 11, "severity": "high"},
+        ]}
+        out = filter_result(result, {"a.php": {11}}, by="file")
+        self.assertEqual({f["file"] for f in out["findings"]}, {"a.php"})
+        self.assertEqual(out["diff"]["reported_findings"], 2)
+
+    def test_filter_normalises_backslash_paths(self):
+        from sbvf.sast.diffscan import filter_result
+        result = {"findings": [{"vuln": "sqli", "file": "src\\a.php", "line": 5,
+                                "severity": "high"}]}
+        out = filter_result(result, {"src/a.php": {5}}, by="line")
+        self.assertEqual(len(out["findings"]), 1)
+
+    def test_git_diff_against_real_repo(self):
+        from sbvf.sast.diffscan import git_diff, changed_lines
+        import shutil
+        if not shutil.which("git"):
+            self.skipTest("git not available")
+        with tempfile.TemporaryDirectory() as d:
+            def g(*a):
+                subprocess.run(["git", "-C", d, *a], check=True,
+                               capture_output=True, text=True)
+            g("init", "-q")
+            g("config", "user.email", "t@t.t")
+            g("config", "user.name", "t")
+            with open(os.path.join(d, "f.py"), "w") as fh:
+                fh.write("a = 1\nb = 2\n")
+            g("add", "-A")
+            g("commit", "-q", "-m", "base")
+            base = subprocess.run(["git", "-C", d, "rev-parse", "HEAD"],
+                                  capture_output=True, text=True).stdout.strip()
+            with open(os.path.join(d, "f.py"), "w") as fh:
+                fh.write("a = 1\nb = 2\nc = 3\n")      # add line 3
+            g("add", "-A")
+            g("commit", "-q", "-m", "change")
+            changed = changed_lines(git_diff(d, base))
+            self.assertIn("f.py", changed)
+            self.assertIn(3, changed["f.py"])
+
+    def test_git_diff_subdir_paths_are_relative(self):
+        # --relative must key changed files relative to the SCANNED subdir so they
+        # line up with finding paths (which are relative to the scan root).
+        from sbvf.sast.diffscan import git_diff, changed_lines
+        import shutil
+        if not shutil.which("git"):
+            self.skipTest("git not available")
+        with tempfile.TemporaryDirectory() as d:
+            sub = os.path.join(d, "svc")
+            os.makedirs(sub)
+
+            def g(*a):
+                subprocess.run(["git", "-C", d, *a], check=True,
+                               capture_output=True, text=True)
+            g("init", "-q")
+            g("config", "user.email", "t@t.t")
+            g("config", "user.name", "t")
+            with open(os.path.join(sub, "h.py"), "w") as fh:
+                fh.write("x = 1\n")
+            g("add", "-A")
+            g("commit", "-q", "-m", "base")
+            base = subprocess.run(["git", "-C", d, "rev-parse", "HEAD"],
+                                  capture_output=True, text=True).stdout.strip()
+            with open(os.path.join(sub, "h.py"), "w") as fh:
+                fh.write("x = 1\ny = 2\n")
+            g("add", "-A")
+            g("commit", "-q", "-m", "change")
+            changed = changed_lines(git_diff(sub, base))     # scan the subdir
+            # key is "h.py" (relative to svc/), NOT "svc/h.py"
+            self.assertIn("h.py", changed)
+            self.assertNotIn("svc/h.py", changed)
+
+    def test_git_diff_bad_ref_raises(self):
+        from sbvf.sast.diffscan import git_diff
+        import shutil
+        if not shutil.which("git"):
+            self.skipTest("git not available")
+        with tempfile.TemporaryDirectory() as d:
+            subprocess.run(["git", "-C", d, "init", "-q"], check=True,
+                           capture_output=True, text=True)
+            with self.assertRaises(RuntimeError):
+                git_diff(d, "nonexistent-ref-xyz")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

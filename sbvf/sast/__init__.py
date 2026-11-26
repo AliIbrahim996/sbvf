@@ -20,6 +20,8 @@ from .bridge import derive_endpoints
 from .routes import extract_routes
 from .confirm import confirm_findings, TargetUnreachable
 from .sarif import to_sarif
+from .diffscan import changed_lines, filter_result
 
 __all__ = ["Finding", "VULN_INFO", "scan_path", "Scanner", "derive_endpoints",
-           "extract_routes", "confirm_findings", "TargetUnreachable", "to_sarif"]
+           "extract_routes", "confirm_findings", "TargetUnreachable", "to_sarif",
+           "changed_lines", "filter_result"]

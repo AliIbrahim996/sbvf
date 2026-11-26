@@ -23,11 +23,15 @@ Examples
 
     # SARIF for GitHub code scanning / GitLab SAST ingestion
     python -m sbvf.scan_code path/to/project --sarif results.sarif
+
+    # diff mode: only findings on lines changed vs a base ref (pull-request CI)
+    python -m sbvf.scan_code . --diff origin/main --sarif results.sarif
 """
 from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 
 from .sast import scan_path
@@ -55,12 +59,21 @@ def main(argv=None):
     ap.add_argument("--json", help="write the full report to this JSON file")
     ap.add_argument("--sarif", help="write findings as a SARIF 2.1.0 log to this "
                     "file (for GitHub code scanning / GitLab SAST ingestion)")
+    ap.add_argument("--diff", metavar="BASE",
+                    help="report only findings on lines changed vs BASE (a git ref "
+                    "or SHA, e.g. origin/main) — diff mode for pull-request CI")
+    ap.add_argument("--diff-by", choices=("line", "file"), default="line",
+                    help="granularity of --diff: 'line' (default) keeps findings on "
+                    "changed lines; 'file' keeps any finding in a changed file")
     ap.add_argument("--verbose", "-v", action="store_true",
                     help="also print every file and taint source")
     args = ap.parse_args(argv)
 
     if not args.path and not args.repo:
         ap.error("provide a PATH to scan or --repo URL")
+    if args.diff and (args.repo or (args.path and is_repo_url(args.path))):
+        ap.error("--diff compares the working tree against a base ref; it needs a "
+                 "local checkout, not a remote repository URL")
 
     cleanup = None
     target = args.repo or args.path
@@ -83,6 +96,20 @@ def main(argv=None):
         if cleanup:
             remove_tree(cleanup)
             print("[*] Removed temporary clone.")
+
+    if args.diff:
+        from .sast.diffscan import git_diff, changed_lines, filter_result
+        try:
+            diff_text = git_diff(os.path.abspath(target), args.diff)
+        except RuntimeError as exc:
+            print(f"[x] {exc}", file=sys.stderr)
+            return 2
+        changed = changed_lines(diff_text)
+        result = filter_result(result, changed, by=args.diff_by)
+        d = result["diff"]
+        print(f"[*] Diff mode vs {args.diff}: {d['base_changed_files']} changed "
+              f"file(s); reporting {d['reported_findings']} of {d['total_findings']} "
+              f"finding(s) ({d['suppressed']} outside the diff, by {d['mode']}).")
 
     counts = result["counts"]
     print("\n=== Summary ===")

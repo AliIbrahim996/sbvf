@@ -173,6 +173,27 @@ jobs:
 The CLI still exits non-zero when any high-severity finding is present, so it can
 also gate a build directly.
 
+#### Diff mode (report only what a pull request changed)
+
+`--diff BASE` scans the whole tree but reports only the findings on lines the
+change **added or modified** relative to `BASE` (a git ref or SHA, compared as
+`BASE...HEAD` — the same set GitHub's *Files changed* shows). This is the subset
+you want as PR annotations, without the pre-existing backlog drowning them out.
+
+```bash
+python -m sbvf.scan_code . --diff origin/main                 # only new findings
+python -m sbvf.scan_code . --diff origin/main --sarif pr.sarif  # + upload them
+python -m sbvf.scan_code . --diff origin/main --diff-by file   # looser: changed files
+```
+
+`--diff-by line` (default) keeps a finding only when its sink line is in the
+diff; `--diff-by file` keeps any finding in a changed file. Paths are matched
+relative to the scanned directory (via `git --relative`), so scanning a
+sub-project works too. Diff mode needs a local checkout — it is rejected for
+remote repository URLs. Its one blind spot is a change that introduces a
+vulnerability whose sink sits on an untouched line; comparing the whole finding
+set by fingerprint (baseline mode) is the complementary approach for that.
+
 The target is **either a local folder or a remote repository URL**. Remote
 repositories must be public and hosted on **GitHub, GitLab or Bitbucket**
 (`https://` only; other hosts, SSH, credentials and ports are rejected). They
