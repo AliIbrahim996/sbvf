@@ -56,13 +56,19 @@ def _loc(f: Dict[str, Any]) -> str:
 
 
 def build_context(question: str, *, scan_id: Optional[int] = None,
-                  max_scans: int = 10, max_findings: int = 20) -> Dict[str, Any]:
-    """Assemble grounding text + citable sources from the repository."""
+                  max_scans: int = 10, max_findings: int = 20,
+                  owner_id: Optional[int] = None, is_admin: bool = False) -> Dict[str, Any]:
+    """Assemble grounding text + citable sources from the repository.
+
+    When *owner_id* is given and *is_admin* is False (multi-user mode), only that
+    user's scans and findings are used as grounding, so Q&A never surfaces another
+    user's data.
+    """
     lines: List[str] = []
     sources: List[Dict[str, Any]] = []
 
     if scan_id is not None:
-        scan = repository.get_scan(scan_id)
+        scan = repository.get_scan(scan_id, owner_id=owner_id, is_admin=is_admin)
         if not scan:
             return {"text": f"Scan #{scan_id} was not found in the history.", "sources": []}
         lines.append(f"Scan #{scan_id} — {scan.get('root', '')} ({scan.get('scan_type')}), "
@@ -75,13 +81,14 @@ def build_context(question: str, *, scan_id: Optional[int] = None,
                             "severity": f.get("severity"), "cwe": f.get("cwe")})
         return {"text": "\n".join(lines), "sources": sources}
 
-    scans = repository.list_scans(max_scans)
+    scans = repository.list_scans(max_scans, owner_id=owner_id, is_admin=is_admin)
     lines.append(f"There are {len(scans)} recent scan(s) in the history:")
     for s in scans:
         lines.append(f"- scan #{s['id']}: {s.get('root', '')} ({s.get('scan_type')}) — "
                      f"{s.get('findings_count')} findings, {s.get('files_scanned')} files, "
                      f"{s.get('created_at')}")
-    matches = repository.search_findings(question, limit=max_findings)
+    matches = repository.search_findings(question, limit=max_findings,
+                                         owner_id=owner_id, is_admin=is_admin)
     if matches:
         lines.append("")
         lines.append("Relevant findings across scans:")

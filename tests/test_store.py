@@ -79,6 +79,70 @@ class TestStoreRoundTrip(unittest.TestCase):
         store.repository.delete_scan(scan_id)
 
 
+@unittest.skipUnless(_HAS_DB and _HAS_PSYCOPG,
+                     "needs DATABASE_URL + psycopg (persistence layer)")
+class TestMultiUser(unittest.TestCase):
+    """Accounts, sessions, and per-user scan scoping (multi-user basics)."""
+
+    @classmethod
+    def setUpClass(cls):
+        assert store.migrate.init(), "schema migration failed"
+
+    def _unique(self, base):
+        import uuid
+        return f"{base}-{uuid.uuid4().hex[:8]}"
+
+    def test_create_user_first_is_admin_and_unique(self):
+        name = self._unique("user")
+        u = store.repository.create_user(name, "password123")
+        self.assertIsNotNone(u)
+        self.assertIn(u["role"], ("admin", "user"))   # first ever is admin; later 'user'
+        self.assertIsNone(store.repository.create_user(name, "password123"))  # duplicate
+
+    def test_verify_user(self):
+        name = self._unique("login")
+        store.repository.create_user(name, "password123")
+        self.assertIsNotNone(store.repository.verify_user(name, "password123"))
+        self.assertIsNone(store.repository.verify_user(name, "wrong-password"))
+        self.assertIsNone(store.repository.verify_user("no-such-user", "password123"))
+
+    def test_session_lifecycle(self):
+        name = self._unique("sess")
+        u = store.repository.create_user(name, "password123")
+        token = store.repository.create_session(u["id"])
+        self.assertTrue(token)
+        got = store.repository.get_session_user(token)
+        self.assertEqual(got["id"], u["id"])
+        self.assertTrue(store.repository.delete_session(token))
+        self.assertIsNone(store.repository.get_session_user(token))   # revoked
+
+    def test_scan_ownership_isolation(self):
+        a = store.repository.create_user(self._unique("owner-a"), "password123")
+        b = store.repository.create_user(self._unique("owner-b"), "password123")
+        sid = store.repository.save_scan(_sample_result(), target="x", owner_id=a["id"])
+        self.assertIsInstance(sid, int)
+        # owner A sees it; B does not; admin override does.
+        self.assertIsNotNone(store.repository.get_scan(sid, owner_id=a["id"]))
+        self.assertIsNone(store.repository.get_scan(sid, owner_id=b["id"]))
+        self.assertIsNotNone(store.repository.get_scan(sid, owner_id=b["id"], is_admin=True))
+        a_ids = [s["id"] for s in store.repository.list_scans(owner_id=a["id"])]
+        b_ids = [s["id"] for s in store.repository.list_scans(owner_id=b["id"])]
+        self.assertIn(sid, a_ids)
+        self.assertNotIn(sid, b_ids)
+        # B cannot delete A's scan; A can.
+        self.assertFalse(store.repository.delete_scan(sid, owner_id=b["id"]))
+        self.assertIsNotNone(store.repository.get_scan(sid, owner_id=a["id"]))
+        self.assertTrue(store.repository.delete_scan(sid, owner_id=a["id"]))
+
+    def test_unscoped_calls_still_see_all(self):
+        # auth-off callers (no owner_id) keep single-user behaviour: see every scan.
+        u = store.repository.create_user(self._unique("legacy"), "password123")
+        sid = store.repository.save_scan(_sample_result(), target="x", owner_id=u["id"])
+        self.assertIn(sid, [s["id"] for s in store.repository.list_scans(limit=200)])
+        self.assertIsNotNone(store.repository.get_scan(sid))
+        store.repository.delete_scan(sid)
+
+
 class TestStoreDisabledSafe(unittest.TestCase):
     """With no DB the repository must degrade to safe no-ops (never raise)."""
 
@@ -89,6 +153,16 @@ class TestStoreDisabledSafe(unittest.TestCase):
         self.assertIsNone(store.repository.save_scan({"findings": []}))
         self.assertFalse(store.repository.delete_scan(1))
         self.assertEqual(store.repository.list_activity(), [])
+
+    @unittest.skipIf(_HAS_DB, "DATABASE_URL is set; disabled-path test not applicable")
+    def test_auth_noops(self):
+        self.assertEqual(store.repository.count_users(), 0)
+        self.assertIsNone(store.repository.create_user("alice", "password123"))
+        self.assertIsNone(store.repository.verify_user("alice", "password123"))
+        self.assertIsNone(store.repository.create_session(1))
+        self.assertIsNone(store.repository.get_session_user("tok"))
+        self.assertFalse(store.repository.delete_session("tok"))
+        self.assertFalse(store.auth.auth_enabled())    # off without a DB
 
 
 if __name__ == "__main__":

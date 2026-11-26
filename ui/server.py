@@ -178,9 +178,14 @@ def _prune_jobs(jobs: dict, kind: str) -> None:
         _free_slot(kind)
 
 
+_UNSET = object()   # sentinel: per-request "current user not yet resolved"
+
+
 class UIHandler(BaseHTTPRequestHandler):
     def log_message(self, *a):
         pass
+
+    _user_cache = _UNSET   # reset at the start of each do_* (overridden per request)
 
     def _guard(self, require_json: bool = False) -> bool:
         """Reject DNS-rebinding / cross-site requests. True = already responded.
@@ -224,7 +229,55 @@ class UIHandler(BaseHTTPRequestHandler):
             except Exception:
                 pass
 
+    # ---- multi-user auth (optional; active only when store.auth.auth_enabled()) --
+    def _session_token(self) -> str:
+        """Read the session cookie value from the request, or '' if absent."""
+        for part in (self.headers.get("Cookie", "") or "").split(";"):
+            name, _, value = part.strip().partition("=")
+            if name == store.auth.SESSION_COOKIE:
+                return value
+        return ""
+
+    def _current_user(self):
+        """The authenticated user for this request, or None (also None when auth
+        is off). Cached per request (``_user_cache`` is reset in each do_* entry)."""
+        if not store.auth.auth_enabled():
+            return None
+        if self._user_cache is not _UNSET:
+            return self._user_cache
+        token = self._session_token()
+        self._user_cache = store.repository.get_session_user(token) if token else None
+        return self._user_cache
+
+    def _scope(self):
+        """(owner_id, is_admin) for scoping store queries. (None, False) when auth
+        is off, so unscoped single-user behaviour is preserved."""
+        user = self._current_user()
+        if user is None:
+            return (None, False)
+        return (user["id"], user.get("role") == "admin")
+
+    def _require_auth(self) -> bool:
+        """When auth is on and the request has no valid session, respond 401 and
+        return True; otherwise return False. A no-op when auth is off."""
+        if not store.auth.auth_enabled():
+            return False
+        if self._current_user() is None:
+            self._json({"message": "authentication required", "auth_enabled": True},
+                       code=401)
+            return True
+        return False
+
+    def _set_session_cookie(self, token: str, max_age: int) -> dict:
+        """Build the Set-Cookie header for a session (max_age=0 clears it)."""
+        parts = [f"{store.auth.SESSION_COOKIE}={token}", "HttpOnly", "SameSite=Lax",
+                 "Path=/", f"Max-Age={max_age}"]
+        if store.auth.cookie_secure():
+            parts.append("Secure")
+        return {"Set-Cookie": "; ".join(parts)}
+
     def do_GET(self):
+        self._user_cache = _UNSET
         if self._guard():
             return
         try:
@@ -242,11 +295,17 @@ class UIHandler(BaseHTTPRequestHandler):
             self.wfile.write(body)
             return
 
-        if parsed.path == "/api/scans":
-            return self._list_scans(urllib.parse.parse_qs(parsed.query))
+        if parsed.path == "/api/auth/me":
+            return self._auth_me()
 
         if parsed.path == "/api/ai/status":
             return self._ai_status()
+
+        if self._require_auth():
+            return
+
+        if parsed.path == "/api/scans":
+            return self._list_scans(urllib.parse.parse_qs(parsed.query))
 
         if parsed.path.startswith("/api/runs/"):
             parts = parsed.path.rstrip("/")[len("/api/runs/"):].split("/")
@@ -278,7 +337,10 @@ class UIHandler(BaseHTTPRequestHandler):
         self.end_headers()
 
     def do_DELETE(self):
+        self._user_cache = _UNSET
         if self._guard():
+            return
+        if self._require_auth():
             return
         parsed = urllib.parse.urlparse(self.path)
         if parsed.path.startswith("/api/scans/"):
@@ -287,6 +349,7 @@ class UIHandler(BaseHTTPRequestHandler):
         self.end_headers()
 
     def do_POST(self):
+        self._user_cache = _UNSET
         if self._guard(require_json=True):
             return
         try:
@@ -296,6 +359,17 @@ class UIHandler(BaseHTTPRequestHandler):
 
     def _route_post(self, parsed):
         path = parsed.path.rstrip("/")
+        # Auth endpoints are public (they establish the session).
+        if path == "/api/auth/register":
+            return self._register()
+        if path == "/api/auth/login":
+            return self._login()
+        if path == "/api/auth/logout":
+            return self._logout()
+
+        if self._require_auth():
+            return
+
         if path == "/api/scans":
             return self._create_scan()
         if path == "/api/runs":
@@ -323,6 +397,9 @@ class UIHandler(BaseHTTPRequestHandler):
             "branch_select": bool(body.get("branch_select")),
             "branch": str(body.get("branch", "") or "").strip(),
             "created": time.monotonic(),
+            # owner captured at registration; the scan is saved under this user
+            # when it later runs on the events stream (auth on -> an id, else None).
+            "owner_id": self._scope()[0],
         }
         token = uuid.uuid4().hex
         with _JOBS_LOCK:
@@ -444,12 +521,68 @@ class UIHandler(BaseHTTPRequestHandler):
                     "message": "History requires the database service (set DATABASE_URL)."},
                    code=503)
 
+    # ---- authentication endpoints (only meaningful when SBVF_AUTH is on) ------
+    def _auth_me(self):
+        """Report auth state and, when signed in, the current user. Always answers,
+        so the frontend can discover whether multi-user is enabled."""
+        if not store.auth.auth_enabled():
+            return self._json({"authenticated": False, "auth_enabled": False})
+        user = self._current_user()
+        self._json({"authenticated": user is not None, "auth_enabled": True,
+                    "user": user})
+
+    def _auth_off(self):
+        self._json({"message": "multi-user auth is not enabled (set SBVF_AUTH with a "
+                               "configured database)."}, code=404)
+
+    def _register(self):
+        if not store.auth.auth_enabled():
+            return self._auth_off()
+        body = self._read_json_body()
+        username = str(body.get("username", "") or "").strip()
+        password = str(body.get("password", "") or "")
+        problem = store.auth.username_problem(username) or store.auth.password_problem(password)
+        if problem:
+            return self._json({"message": problem}, code=400)
+        user = store.repository.create_user(username, password)
+        if user is None:
+            return self._json({"message": "username is already taken"}, code=409)
+        token = store.repository.create_session(user["id"])   # auto-login on register
+        if token is None:
+            return self._json({"message": "could not start a session"}, code=500)
+        self._json({"ok": True, "user": user}, code=201,
+                   headers=self._set_session_cookie(token, store.auth.SESSION_TTL_SECONDS))
+
+    def _login(self):
+        if not store.auth.auth_enabled():
+            return self._auth_off()
+        body = self._read_json_body()
+        username = str(body.get("username", "") or "").strip()
+        password = str(body.get("password", "") or "")
+        user = store.repository.verify_user(username, password)
+        if user is None:
+            return self._json({"message": "invalid username or password"}, code=401)
+        token = store.repository.create_session(user["id"])
+        if token is None:
+            return self._json({"message": "could not start a session"}, code=500)
+        self._json({"ok": True, "user": user},
+                   headers=self._set_session_cookie(token, store.auth.SESSION_TTL_SECONDS))
+
+    def _logout(self):
+        if not store.auth.auth_enabled():
+            return self._auth_off()
+        store.repository.delete_session(self._session_token())
+        self._json({"ok": True}, headers=self._set_session_cookie("", 0))
+
     def _list_scans(self, qs):
         if not store.is_enabled():
             return self._persistence_off()
         limit = _int_param(qs, "limit", 50, 1, 200)
         offset = _int_param(qs, "offset", 0, 0, 1_000_000)
-        self._json({"enabled": True, "scans": store.repository.list_scans(limit, offset)})
+        owner_id, is_admin = self._scope()
+        self._json({"enabled": True,
+                    "scans": store.repository.list_scans(limit, offset,
+                                                         owner_id=owner_id, is_admin=is_admin)})
 
     def _get_scan(self, raw_id):
         if not store.is_enabled():
@@ -458,7 +591,8 @@ class UIHandler(BaseHTTPRequestHandler):
             scan_id = int(raw_id)
         except ValueError:
             return self._json({"message": "bad scan id"}, code=400)
-        scan = store.repository.get_scan(scan_id)
+        owner_id, is_admin = self._scope()
+        scan = store.repository.get_scan(scan_id, owner_id=owner_id, is_admin=is_admin)
         if scan is None:
             return self._json({"message": "scan not found"}, code=404)
         self._json(scan)
@@ -470,12 +604,19 @@ class UIHandler(BaseHTTPRequestHandler):
             scan_id = int(raw_id)
         except ValueError:
             return self._json({"message": "bad scan id"}, code=400)
-        ok = store.repository.delete_scan(scan_id)
+        owner_id, is_admin = self._scope()
+        ok = store.repository.delete_scan(scan_id, owner_id=owner_id, is_admin=is_admin)
         self._json({"deleted": ok}, code=200 if ok else 404)
 
     def _list_activity(self, qs):
         if not store.is_enabled():
             return self._persistence_off()
+        # The activity log is a cross-scan audit trail; in multi-user mode restrict
+        # it to admins so it cannot reveal other users' scans. (Per-user activity
+        # scoping is a follow-up.)
+        _, is_admin = self._scope()
+        if store.auth.auth_enabled() and not is_admin:
+            return self._json({"enabled": True, "activity": [], "admin_only": True})
         limit = _int_param(qs, "limit", 100, 1, 500)
         sid = qs.get("scan_id", [None])[0]
         scan_id = _int_param(qs, "scan_id", 1, 1, 1_000_000) if sid not in (None, "") else None
@@ -495,7 +636,8 @@ class UIHandler(BaseHTTPRequestHandler):
             scan_id = int(raw_id)
         except ValueError:
             return self._json({"message": "bad scan id"}, code=400)
-        if store.repository.get_scan(scan_id) is None:
+        owner_id, is_admin = self._scope()
+        if store.repository.get_scan(scan_id, owner_id=owner_id, is_admin=is_admin) is None:
             return self._json({"message": "scan not found"}, code=404)
         self._json(store.repository.get_ai(scan_id))
 
@@ -511,6 +653,13 @@ class UIHandler(BaseHTTPRequestHandler):
         except ValueError:
             return self._json({"message": "bad scan id"}, code=400)
         body = self._read_json_body()
+
+        # Ownership gate (auth on): don't run agents over someone else's scan.
+        owner_id, is_admin = self._scope()
+        if (store.is_enabled() and owner_id is not None
+                and store.repository.get_scan(scan_id, owner_id=owner_id,
+                                              is_admin=is_admin) is None):
+            return self._json({"message": "scan not found"}, code=404)
 
         self.send_response(200)
         self.send_header("Content-Type", "text/event-stream")
@@ -564,8 +713,10 @@ class UIHandler(BaseHTTPRequestHandler):
             scan_id = None
         if scan_id is not None and scan_id < 1:
             scan_id = None   # 0/negative is not a real scan id -> global thread
+        owner_id, is_admin = self._scope()
         result = agents.runner.answer_question(
-            question, scan_id=scan_id, provider_name=(body.get("provider") or None))
+            question, scan_id=scan_id, provider_name=(body.get("provider") or None),
+            owner_id=owner_id, is_admin=is_admin)
         if not result.get("ok"):
             return self._json({"message": result.get("error", "Q&A failed")}, code=502)
         self._json(result)
@@ -706,7 +857,8 @@ class UIHandler(BaseHTTPRequestHandler):
                 scan_id = store.repository.save_scan(
                     result, target=(custom or sample),
                     scan_type=scan_type,
-                    duration_ms=int((time.monotonic() - started) * 1000))
+                    duration_ms=int((time.monotonic() - started) * 1000),
+                    owner_id=params.get("owner_id"))
                 if scan_id is not None:
                     result["scan_id"] = scan_id
             except Exception:

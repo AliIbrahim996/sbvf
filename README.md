@@ -320,6 +320,38 @@ docker compose up sbvf                 # dashboard at http://localhost:8080
 docker compose --profile labs up       # also starts DVWA at http://localhost:8081
 ```
 
+## Multi-user (optional)
+
+By default the dashboard is **single-user** and open (hardened for localhost). To
+share a self-hosted instance across a small team, enable accounts and per-user
+scan isolation by setting **`SBVF_AUTH=1`** with a configured database
+(`DATABASE_URL`). With the flag unset, nothing changes — no login, scans unscoped.
+
+When enabled:
+- the API gains `POST /api/auth/register`, `POST /api/auth/login`,
+  `POST /api/auth/logout` and `GET /api/auth/me`; login sets an `HttpOnly`,
+  `SameSite=Lax` session cookie (add `SBVF_COOKIE_SECURE=1` behind HTTPS);
+- the **first** registered user becomes an **admin**; everyone else is a regular
+  user;
+- every scan is owned by its creator, and the protected endpoints (history, a
+  scan, its AI analysis, Q&A) are **scoped to the owner** — a user sees only their
+  own scans, while an admin sees all. Scans created before auth was enabled are
+  *unowned* and visible to admins only;
+- all protected endpoints require a session (401 otherwise); the audit log is
+  admin-only.
+
+Passwords are hashed with `scrypt` and session tokens are stored hashed
+(`sbvf/store/auth.py`) — no third-party dependency. This is the backend; the
+dashboard **login page is the next step**, so for now drive auth from an API
+client:
+
+```bash
+C=cookies.txt
+curl -sc $C -X POST localhost:8080/api/auth/register \
+  -H 'Content-Type: application/json' -d '{"username":"alice","password":"password123"}'
+curl -sb $C localhost:8080/api/scans        # only alice's scans
+```
+
 ## Layout
 
 ```

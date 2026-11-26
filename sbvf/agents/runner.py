@@ -144,11 +144,14 @@ def run_finding_agents(scan_id: int, *, agents: Optional[List[str]] = None,
 
 
 def answer_question(question: str, *, scan_id: Optional[int] = None,
-                    provider_name: Optional[str] = None) -> Dict[str, Any]:
+                    provider_name: Optional[str] = None,
+                    owner_id: Optional[int] = None, is_admin: bool = False) -> Dict[str, Any]:
     """Answer a natural-language question grounded in the stored scan history.
 
     Persists the user and assistant turns (best-effort) and returns the answer
     plus the sources used. Degrades gracefully when no provider is configured.
+    When *owner_id* is given and *is_admin* is False, grounding is limited to that
+    user's own scans (multi-user mode).
     """
     from . import retrieval  # local import keeps module load cheap
     from .provider import ProviderError
@@ -162,7 +165,8 @@ def answer_question(question: str, *, scan_id: Optional[int] = None,
     if provider is None:
         return {"ok": False, "error": "no AI provider configured"}
 
-    ctx = retrieval.build_context(question, scan_id=scan_id)
+    ctx = retrieval.build_context(question, scan_id=scan_id,
+                                  owner_id=owner_id, is_admin=is_admin)
     try:
         answer = QAAgent(provider).ask(question, ctx["text"]).strip()
     except (ProviderError, AgentError) as exc:

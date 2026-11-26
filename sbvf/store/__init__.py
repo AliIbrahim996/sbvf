@@ -7,9 +7,9 @@ every repository call is a safe no-op, so the scanner runs unchanged.
 """
 from __future__ import annotations
 
-from . import db, migrate, repository
+from . import db, migrate, repository, auth
 
-__all__ = ["db", "migrate", "repository", "is_enabled"]
+__all__ = ["db", "migrate", "repository", "auth", "is_enabled"]
 
 
 def is_enabled() -> bool:
