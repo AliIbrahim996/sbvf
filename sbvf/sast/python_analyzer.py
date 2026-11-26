@@ -105,6 +105,8 @@ _ATTR_METHOD = {
 # FastAPI parameter marker -> input method.
 _MARKER_METHOD = {"Query": "GET", "Path": "PATH", "Body": "POST", "Form": "POST",
                   "File": "POST", "Cookie": "COOKIE", "Header": "HEADER"}
+# Flask route path segment: <name> or <converter:name> (e.g. <int:uid>).
+_FLASK_PATH_PARAM = re.compile(r"<(?:[^:>]+:)?(\w+)>")
 
 # --- IDOR (broken object-level access control, OWASP A01) --------------------
 # A request-controlled id reaching a by-id data fetch, in a handler that performs
@@ -553,6 +555,7 @@ class PythonAnalyzer:
         defaults_map = self._default_markers(args)
         has_request = any(a.arg in ("request", "req") for a in all_args)
         path_params = set(self._route_path_params(func))
+        flask_params = set(self._flask_route_params(func)) if self.framework == "flask" else set()
         for a in all_args:
             name = a.arg
             if name in PARAM_SKIP:
@@ -571,6 +574,13 @@ class PythonAnalyzer:
             elif self.framework == "django":
                 # Django view: positional URL kwargs after `request` are user-controlled.
                 if has_request and name not in ("request", "req"):
+                    scope.tainted[name] = f"URL parameter '{name}'"
+                    scope.origin[name] = (name, "PATH")
+            elif self.framework == "flask":
+                # Flask view: a parameter named by a <converter:name> segment of the
+                # route is a user-controlled URL path value. (request.args/form are
+                # recognised as sources directly, independent of the parameters.)
+                if is_route and name in flask_params:
                     scope.tainted[name] = f"URL parameter '{name}'"
                     scope.origin[name] = (name, "PATH")
             # native: parameters are not assumed to be user input.
@@ -606,6 +616,16 @@ class PythonAnalyzer:
                     if k.arg == "path":
                         tmpl = _const_str(k.value)
                 out += route_path_params(tmpl)
+        return out
+
+    def _flask_route_params(self, func) -> List[str]:
+        """``<converter:name>`` segment names in the handler's Flask route(s)."""
+        out = []
+        for d in func.decorator_list:
+            if isinstance(d, ast.Call) and _name_of(d.func).split(".")[-1] in ROUTE_METHODS:
+                tmpl = _const_str(d.args[0]) if d.args else None
+                if tmpl:
+                    out += _FLASK_PATH_PARAM.findall(tmpl)
         return out
 
     def _is_route_handler(self, func) -> bool:
