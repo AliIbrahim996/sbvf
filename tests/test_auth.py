@@ -19,15 +19,15 @@ class TestPasswordHashing(unittest.TestCase):
         self.assertTrue(auth.verify_password("correct horse battery staple", h))
 
     def test_wrong_password_fails(self):
-        h = auth.hash_password("s3cret-password")
-        self.assertFalse(auth.verify_password("s3cret-passwrd", h))
+        h = auth.hash_password("alpha-bravo-charlie")
+        self.assertFalse(auth.verify_password("alpha-bravo-delta", h))
 
     def test_salt_is_random(self):
-        a = auth.hash_password("same-password-xyz")
-        b = auth.hash_password("same-password-xyz")
+        a = auth.hash_password("orange-river-kite")
+        b = auth.hash_password("orange-river-kite")
         self.assertNotEqual(a, b)                   # distinct salts -> distinct encodings
-        self.assertTrue(auth.verify_password("same-password-xyz", a))
-        self.assertTrue(auth.verify_password("same-password-xyz", b))
+        self.assertTrue(auth.verify_password("orange-river-kite", a))
+        self.assertTrue(auth.verify_password("orange-river-kite", b))
 
     def test_encoding_format(self):
         h = auth.hash_password("abcdefgh")
