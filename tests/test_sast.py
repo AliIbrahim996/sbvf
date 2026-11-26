@@ -2507,5 +2507,66 @@ class TestBaseline(unittest.TestCase):
         self.assertEqual(out["baseline"]["suppressed"], len(res["findings"]))
 
 
+class TestBenchmarkCli(unittest.TestCase):
+    """The benchmark CLI uses argparse, so --help exits cleanly (reviewer bug)."""
+
+    def test_help_does_not_crash(self):
+        from sbvf.sast import benchmark
+        with self.assertRaises(SystemExit) as cm:   # argparse exits 0 on --help
+            benchmark.main(["--help"])
+        self.assertEqual(cm.exception.code, 0)
+
+
+class TestThirdPartyBenchmark(unittest.TestCase):
+    """Documented-class recall scoring over real apps (improvement: external benchmark)."""
+
+    def test_match_all_found(self):
+        from sbvf.sast.thirdparty_benchmark import match
+        findings = [{"vuln": "sqli", "file": "a.py"}, {"vuln": "xss", "file": "b.py"}]
+        r = match(findings, [{"vuln": "sqli"}, {"vuln": "xss"}])
+        self.assertEqual(r["missed"], [])
+        self.assertEqual(r["recall"], 1.0)
+
+    def test_match_missing_class(self):
+        from sbvf.sast.thirdparty_benchmark import match
+        findings = [{"vuln": "sqli", "file": "a.py"}]
+        r = match(findings, [{"vuln": "sqli"}, {"vuln": "command_injection"}])
+        self.assertEqual(r["found"], ["sqli"])
+        self.assertEqual(r["missed"], ["command_injection"])
+        self.assertEqual(r["recall"], 0.5)
+
+    def test_match_file_hint(self):
+        from sbvf.sast.thirdparty_benchmark import match
+        findings = [{"vuln": "sqli", "file": "routes/other.js"}]
+        # a hint that does not match the finding's file -> not recalled
+        self.assertEqual(match(findings, [{"vuln": "sqli", "file_hint": "models/"}])["missed"],
+                         ["sqli"])
+        self.assertEqual(match(findings, [{"vuln": "sqli", "file_hint": "routes/"}])["found"],
+                         ["sqli"])
+
+    def test_match_empty_expected(self):
+        from sbvf.sast.thirdparty_benchmark import match
+        self.assertIsNone(match([], [])["recall"])
+
+    def test_targets_use_known_classes(self):
+        # every expected class must be a real model vulnerability class
+        from sbvf.sast.thirdparty_benchmark import TARGETS
+        from sbvf.sast.model import VULN_INFO
+        for t in TARGETS:
+            for exp in t["expected"]:
+                self.assertIn(exp["vuln"], VULN_INFO, f"{t['name']}: {exp['vuln']}")
+
+    @unittest.skipUnless(os.environ.get("SBVF_NET_TESTS") == "1",
+                         "network test: set SBVF_NET_TESTS=1 to clone-scan a real app")
+    def test_clone_scan_dsvw(self):
+        from sbvf.sast.thirdparty_benchmark import benchmark_target, TARGETS
+        dsvw = next(t for t in TARGETS if t["name"] == "dsvw")
+        row = benchmark_target(dsvw)
+        self.assertTrue(row.get("ok"), row.get("error"))
+        self.assertIn("sqli", row["found"])
+        self.assertIn("command_injection", row["found"])
+        self.assertGreaterEqual(row["recall"], 0.8)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
