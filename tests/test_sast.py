@@ -461,6 +461,31 @@ class TestInterproceduralPhp(unittest.TestCase):
                "mysqli_query($c, \"SELECT * FROM t WHERE a=\" . outer());\n")
         self.assertTrue(any(f.vuln == "sqli" for f in self._php(src)))
 
+    def test_sink_param_not_first_arg(self):
+        # Reviewer gap: the tainted value is the SECOND argument; the first is the
+        # (clean) connection — the common query($db, $sql) shape. Previously the
+        # SQLi was attributed to the connection param and the helper was missed.
+        src = ("<?php\n"
+               "function q($c, $v) { mysqli_query($c, \"SELECT \" . $v); }\n"
+               "q($conn, $_GET['a']);\n")
+        got = [f for f in self._php(src) if f.vuln == "sqli"]
+        self.assertTrue(got, "SQLi through a non-first helper parameter must be found")
+        self.assertEqual(got[0].param, "a")
+
+    def test_sink_param_not_first_arg_interpolated(self):
+        src = ("<?php\n"
+               "function q($c, $v) { mysqli_query($c, \"SELECT $v\"); }\n"
+               "q($conn, $_GET['a']);\n")
+        self.assertTrue(any(f.vuln == "sqli" for f in self._php(src)))
+
+    def test_sink_param_second_arg_clean_value(self):
+        # A constant in the value position must not be flagged (no over-report when
+        # only the connection matches the summary's sink param).
+        src = ("<?php\n"
+               "function q($c, $v) { mysqli_query($c, \"SELECT \" . $v); }\n"
+               "q($conn, 5);\n")
+        self.assertEqual([f for f in self._php(src) if f.vuln == "sqli"], [])
+
 
 class TestParamRecovery(unittest.TestCase):
     """The PHP analyzer records the request parameter + method behind each finding,

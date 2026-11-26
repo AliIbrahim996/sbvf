@@ -250,14 +250,30 @@ class PhpAnalyzer:
                 break
 
     def _summarize_func(self, params, body):
-        """Analyze a function body with its parameters seeded as taint, using the
-        shared summaries for any helper it calls."""
+        """Summarize a function body, using the shared summaries for any helper it
+        calls. Returns ``(returns_source, sink_params)``.
+
+        Each parameter is seeded as taint *independently* rather than all at once,
+        so a sink's dangerous argument is attributed to the right parameter. With
+        all parameters tainted together, a call like ``mysqli_query($c, "…".$v)``
+        would attribute the SQLi to whichever tainted name appears first in the
+        call region — the connection ``$c`` — and miss ``$v``. Seeding one at a
+        time isolates the parameter actually responsible for each sink, which is
+        what the call-site position mapping in ``_check_helper_sinks`` needs.
+        """
+        sink_params = set()
+        for p in params:
+            sub = PhpAnalyzer(self.framework)
+            sub._summaries = self._summaries           # share for transitive calls
+            found = sub.analyze("<summary>", "<?php\n" + body, seed_params=[p])
+            for f in found:
+                if f.method == "PARAM" and f.param == p:
+                    sink_params.add((p, f.vuln))
+        # returns_source is about returning a real input source, independent of the
+        # parameters, so one empty-seed pass is enough (and cheaper than per-param).
         sub = PhpAnalyzer(self.framework)
-        sub._summaries = self._summaries               # share for transitive calls
-        found = sub.analyze("<summary>", "<?php\n" + body, seed_params=params)
-        pset = set(params)
-        sink_params = {(f.param, f.vuln) for f in found
-                       if f.method == "PARAM" and f.param in pset}
+        sub._summaries = self._summaries
+        sub.analyze("<summary>", "<?php\n" + body, seed_params=[])
         return getattr(sub, "_returns_source", False), sink_params
 
     def _compute_returns_source(self, statements, tainted) -> bool:
