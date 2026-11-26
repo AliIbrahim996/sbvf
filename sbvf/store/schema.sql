@@ -118,6 +118,32 @@ CREATE TABLE IF NOT EXISTS chat_messages (
     details     jsonb NOT NULL DEFAULT '{}'::jsonb
 );
 
+-- ---------------------------------------------------------------------------
+-- Multi-user layer (optional). Active only when the server runs with SBVF_AUTH
+-- set; the tables are created regardless but stay empty otherwise. Written only
+-- through repository.py. Scans gain a nullable owner_id: pre-auth / unowned
+-- scans keep NULL and are visible to admins only.
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS users (
+    id            BIGSERIAL PRIMARY KEY,
+    username      text UNIQUE NOT NULL,
+    password_hash text NOT NULL,              -- scrypt$n$r$p$salt$hash (see auth.py)
+    role          text NOT NULL DEFAULT 'user',   -- 'admin' | 'user'
+    created_at    timestamptz NOT NULL DEFAULT now(),
+    last_login_at timestamptz
+);
+
+CREATE TABLE IF NOT EXISTS sessions (
+    id          BIGSERIAL PRIMARY KEY,
+    token_hash  text UNIQUE NOT NULL,          -- sha256 of the cookie token (never the token)
+    user_id     bigint NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    created_at  timestamptz NOT NULL DEFAULT now(),
+    expires_at  timestamptz NOT NULL
+);
+
+-- Owner of a scan (NULL for scans created before auth was enabled).
+ALTER TABLE scans ADD COLUMN IF NOT EXISTS owner_id bigint REFERENCES users(id) ON DELETE SET NULL;
+
 CREATE INDEX IF NOT EXISTS idx_findings_scan      ON findings(scan_id);
 CREATE INDEX IF NOT EXISTS idx_findings_severity  ON findings(severity);
 CREATE INDEX IF NOT EXISTS idx_scans_created      ON scans(created_at DESC);
@@ -127,3 +153,6 @@ CREATE INDEX IF NOT EXISTS idx_agent_runs_scan    ON agent_runs(scan_id);
 CREATE INDEX IF NOT EXISTS idx_assessments_scan   ON finding_assessments(scan_id);
 CREATE INDEX IF NOT EXISTS idx_prioritizations_scan ON scan_prioritizations(scan_id);
 CREATE INDEX IF NOT EXISTS idx_chat_scan          ON chat_messages(scan_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_sessions_token      ON sessions(token_hash);
+CREATE INDEX IF NOT EXISTS idx_sessions_expires    ON sessions(expires_at);
+CREATE INDEX IF NOT EXISTS idx_scans_owner         ON scans(owner_id);

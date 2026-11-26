@@ -365,5 +365,31 @@ class TestCredentialScrubbing(unittest.TestCase):
             os.environ.pop("SBVF_EXTRA_GIT_HOSTS", None)
 
 
+class TestAuthDisabledByDefault(unittest.TestCase):
+    """With SBVF_AUTH unset (the default), the server stays open and auth endpoints
+    are inert — so the single-user behaviour is unchanged."""
+
+    def test_auth_me_reports_disabled(self):
+        with _Server() as s:
+            status, body = s.request("GET", "/api/auth/me")
+            self.assertEqual(status, 200)
+            data = json.loads(body)
+            self.assertFalse(data["auth_enabled"])
+            self.assertFalse(data["authenticated"])
+
+    def test_login_is_404_when_auth_off(self):
+        with _Server() as s:
+            status, _ = s.request("POST", "/api/auth/login",
+                                  headers={"Content-Type": "application/json"},
+                                  body='{"username":"a","password":"password123"}')
+            self.assertEqual(status, 404)
+
+    def test_protected_endpoints_not_gated_when_auth_off(self):
+        # /api/scans must still respond (503 "history off" without a DB), NOT 401.
+        with _Server() as s:
+            status, _ = s.request("GET", "/api/scans")
+            self.assertIn(status, (200, 503))
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
