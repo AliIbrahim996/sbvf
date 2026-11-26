@@ -108,6 +108,15 @@ _PHP_IDOR_GUARD = re.compile(
 # (e.g. $_GET['id'] -> param "id", method "GET") so the dynamic search can target it.
 SUPERGLOBAL_KEY = re.compile(
     r"\$_(GET|POST|REQUEST|COOKIE)\s*\[\s*['\"]([A-Za-z0-9_\-]+)['\"]")
+# Laravel request accessors naming a parameter, so framework findings also carry a
+# recoverable (param, method) and become dynamically confirmable (improvement 4.5):
+#   $request->input('name') / ->query('q') / ->post('x') / request('y') / $request['z']
+LARAVEL_METHOD_KEY = re.compile(
+    r"(?:\$request|\$this->request|request\(\))\s*->\s*"
+    r"(input|get|query|post|json|string|integer|boolean)\s*\(\s*['\"]([\w\-]+)['\"]")
+LARAVEL_FACADE_KEY = re.compile(
+    r"Input::\s*(get|input|post|query)\s*\(\s*['\"]([\w\-]+)['\"]")
+LARAVEL_ARRAY_KEY = re.compile(r"\$request\s*\[\s*['\"]([\w\-]+)['\"]")
 
 
 class PhpAnalyzer:
@@ -178,6 +187,9 @@ class PhpAnalyzer:
         # method does not suppress IDOR in a sibling method of the same file).
         self._guard_ranges = self._compute_guard_ranges(source)
         self._file_guarded = bool(_PHP_IDOR_GUARD.search(source))
+        # Enclosing function/method name per line, so a finding can be tied to the
+        # controller method that holds it (needed for Laravel route recovery, 4.5).
+        self._func_ranges = self._compute_func_ranges(source)
 
         # Pass 2: flow-sensitive sink check (improvement 4.4). Walk the statements
         # in order with a *live* taint set seeded from pass 1; when a variable is
@@ -385,6 +397,33 @@ class PhpAnalyzer:
             ranges.append((start, end, bool(_PHP_IDOR_GUARD.search(body))))
         return ranges
 
+    def _compute_func_ranges(self, source: str):
+        """[(name, start_line, end_line)] for each PHP function/method body."""
+        ranges = []
+        for m in re.finditer(r"function\s+(\w+)\s*\([^)]*\)[^{;]*\{", source):
+            depth, i, n = 0, m.end() - 1, len(source)
+            while i < n:
+                c = source[i]
+                if c == "{":
+                    depth += 1
+                elif c == "}":
+                    depth -= 1
+                    if depth == 0:
+                        break
+                i += 1
+            start = source.count("\n", 0, m.start()) + 1
+            end = source.count("\n", 0, min(i, n - 1)) + 1
+            ranges.append((m.group(1), start, end))
+        return ranges
+
+    def _line_function(self, line: int) -> str:
+        """Name of the innermost function/method enclosing *line* ("" at top level)."""
+        best = None
+        for name, start, end in getattr(self, "_func_ranges", []):
+            if start <= line <= end and (best is None or start > best[1]):
+                best = (name, start)
+        return best[0] if best else ""
+
     def _line_guarded(self, line: int) -> bool:
         """Whether *line* sits in a guarded function; top-level code falls back to
         a file-wide signal."""
@@ -412,9 +451,23 @@ class PhpAnalyzer:
                 return
 
     def _superglobal_in(self, text: str):
-        """(param, method) for the first concrete superglobal access in *text*, else None."""
+        """(param, method) for the first concrete request access in *text*, else None.
+
+        Recognises native superglobals ($_GET['id']) and Laravel request accessors
+        ($request->input('name'), request('q'), Input::get('x'), $request['z'])."""
         m = SUPERGLOBAL_KEY.search(text)
-        return (m.group(2), m.group(1)) if m else None
+        if m:
+            return (m.group(2), m.group(1))
+        m = LARAVEL_METHOD_KEY.search(text)
+        if m:
+            return (m.group(2), "POST" if m.group(1) == "post" else "GET")
+        m = LARAVEL_FACADE_KEY.search(text)
+        if m:
+            return (m.group(2), "POST" if m.group(1) == "post" else "GET")
+        m = LARAVEL_ARRAY_KEY.search(text)
+        if m:
+            return (m.group(1), "REQUEST")
+        return None
 
     def _endpoint_for(self, region: str):
         """Best-effort (param, method) for a tainted sink region: a direct
@@ -645,7 +698,7 @@ class PhpAnalyzer:
         param, method = self._endpoint_for(region) if region else ("", "GET")
         f = Finding(vuln=vuln, file=self._rel, line=line, sink=sink.strip(),
                     source=source, framework=self.framework, code=code,
-                    param=param, method=method,
+                    param=param, method=method, function=self._line_function(line),
                     message=f"Tainted value from {source} reaches {sink.strip()}.")
         findings.append(f)
         if self._on_source:

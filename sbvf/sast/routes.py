@@ -17,6 +17,10 @@ Supported:
 * **FastAPI** -- ``@app.get('/x')`` / ``@router.post(...)`` / ``api_route``
   decorators, ``APIRouter(prefix=...)`` and ``include_router(..., prefix=...)``.
   ``{param}`` placeholders are filled the same way.
+* **Flask** -- ``@app.route('/x/<id>', methods=[...])`` / ``@app.get(...)`` and
+  blueprints (``Blueprint(url_prefix=...)`` / ``register_blueprint(...)``).
+* **Laravel** -- ``Route::get('/x/{id}', [Ctrl::class, 'm'])`` / ``'Ctrl@m'`` in
+  ``routes/*.php`` (flat routes; group/prefix closures are not followed).
 
 * **Express** -- ``app.get('/x', ...)`` / ``router.post(...)`` /
   ``router.route('/x').get(...)``; inline callbacks (keyed by the line of the
@@ -65,6 +69,7 @@ def extract_routes(root: str) -> Dict[RouteKey, List[Route]]:
     base = root if os.path.isdir(root) else os.path.dirname(root)
     trees: Dict[str, ast.Module] = {}
     js_sources: Dict[str, str] = {}
+    php_sources: Dict[str, str] = {}
     for path in iter_source_files(root):
         rel = _noext(os.path.relpath(path, base))
         try:
@@ -74,12 +79,16 @@ def extract_routes(root: str) -> Dict[RouteKey, List[Route]]:
                 trees[rel] = ast.parse(text)
             elif path.endswith(JS_EXT):
                 js_sources[rel] = text
+            elif path.endswith(".php"):
+                php_sources[rel] = text
         except (SyntaxError, ValueError, OSError):
             continue
     routes: Dict[RouteKey, List[Route]] = {}
     _django_routes(trees, routes)
     _fastapi_routes(trees, routes)
     _flask_routes(trees, routes)
+    if php_sources:
+        _laravel_routes(php_sources, routes)
     if js_sources:
         _js_routes(js_sources, routes)
     return routes
@@ -353,6 +362,100 @@ def _flask_routes(trees, routes):
                     _add(routes, (mod, fn.name), Route(
                         path=path, template=full, methods=methods, path_params=names,
                         framework="flask", source=f"{mod}.py:{d.lineno}"))
+
+
+# --- Laravel (PHP) ------------------------------------------------------------
+
+_LARAVEL_VERB = re.compile(
+    r"Route::\s*(get|post|put|patch|delete|any|options|match)\s*\(", re.I)
+_LARAVEL_PARAM = re.compile(r"\{(\w+)\??\}")          # {id} / {id?}
+# action forms: [Ctrl::class, 'method']  or  'Ctrl@method'
+_ACTION_ARRAY = re.compile(r"\[\s*([\w\\]+)::class\s*,\s*['\"](\w+)['\"]")
+_ACTION_STR = re.compile(r"['\"]([\w\\]+)@(\w+)['\"]")
+
+
+def _balanced_region(text: str, open_idx: int) -> str:
+    """Text inside the balanced parentheses starting at *open_idx* (no outer parens)."""
+    depth, out = 0, []
+    for ch in text[open_idx:]:
+        if ch == "(":
+            depth += 1
+            if depth == 1:
+                continue
+        elif ch == ")":
+            depth -= 1
+            if depth == 0:
+                break
+        out.append(ch)
+    return "".join(out)
+
+
+def _split_php_args(s: str) -> List[str]:
+    """Split a PHP argument list on top-level commas (quote/bracket aware)."""
+    args, depth, buf, quote = [], 0, [], None
+    for ch in s:
+        if quote:
+            buf.append(ch)
+            if ch == quote:
+                quote = None
+            continue
+        if ch in "'\"":
+            quote = ch
+        elif ch in "([{":
+            depth += 1
+        elif ch in ")]}":
+            depth -= 1
+        elif ch == "," and depth == 0:
+            args.append("".join(buf).strip())
+            buf = []
+            continue
+        buf.append(ch)
+    if "".join(buf).strip():
+        args.append("".join(buf).strip())
+    return args
+
+
+def _laravel_action(expr: str) -> Tuple[str, str]:
+    """(controller class basename, method) for a route action, else ('', '')."""
+    m = _ACTION_ARRAY.search(expr) or _ACTION_STR.search(expr)
+    if not m:
+        return "", ""
+    return m.group(1).split("\\")[-1], m.group(2)
+
+
+def _laravel_routes(php_sources: Dict[str, str], routes) -> None:
+    """Route::verb('/path/{id}', [Ctrl::class,'m']) / 'Ctrl@m' in routes/*.php.
+
+    Flat routes only; nested group/prefix closures are a documented limitation."""
+    # Controller class name -> module key (match by file basename).
+    controllers = {os.path.basename(mod): mod for mod in php_sources}
+    for mod, text in php_sources.items():
+        for m in _LARAVEL_VERB.finditer(text):
+            verb = m.group(1).lower()
+            region = _balanced_region(text, text.index("(", m.start()))
+            args = _split_php_args(region)
+            if verb == "match":                       # match([verbs], '/path', action)
+                if len(args) < 3:
+                    continue
+                tmpl_arg, action_arg, methods = args[1], args[2], ("*",)
+            else:
+                if len(args) < 2:
+                    continue
+                tmpl_arg, action_arg = args[0], args[1]
+                methods = ("*",) if verb in ("any", "options") else (verb.upper(),)
+            tm = re.match(r"\s*['\"]([^'\"]*)['\"]", tmpl_arg)
+            if not tm:
+                continue
+            cls, method = _laravel_action(action_arg)
+            cmod = controllers.get(cls)
+            if not (cls and method and cmod):
+                continue
+            template = "/" + tm.group(1).lstrip("/")
+            path, names = _fill(template, _LARAVEL_PARAM)
+            line = text.count("\n", 0, m.start()) + 1
+            _add(routes, (cmod, method), Route(
+                path=path, template=template, methods=methods, path_params=names,
+                framework="laravel", source=f"{mod}.php:{line}"))
 
 
 # --- Express / NestJS -------------------------------------------------------------

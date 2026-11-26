@@ -27,11 +27,12 @@ request and inspecting the response:
 * the route must be recoverable:
     - **native PHP** is file-routed: ``shop/item.php`` + ``$_GET['id']`` ->
       ``/shop/item.php?id=``;
-    - **Django / FastAPI / Express / NestJS** routes are read from routing code
-      (``urls.py``, decorators, ``app.get``/``app.use``, ``@Controller``/``@Get``)
-      by :mod:`sbvf.sast.routes` and matched to the handler that holds the sink;
-    - Laravel / Yii / native Python / native Node have no statically-recoverable
-      route table here, so their findings stay static-only.
+    - **Django / FastAPI / Flask / Express / NestJS / Laravel** routes are read from
+      routing code (``urls.py``, decorators, ``app.get``/``app.use``,
+      ``@Controller``/``@Get``, ``Route::get(...)`` in ``routes/*.php``) by
+      :mod:`sbvf.sast.routes` and matched to the handler that holds the sink;
+    - Yii / native Python / native Node have no statically-recoverable route table
+      here, so their findings stay static-only.
 
 These limitations are documented in the thesis as threats to validity.
 """
@@ -59,7 +60,7 @@ INPUT_METHODS = {
 # PHP frameworks whose URL routing is file-based (path == file path).
 FILE_ROUTED_PHP = {"php-native"}
 # Frameworks whose routes sbvf.sast.routes can recover from routing code.
-ROUTED = {"django", "fastapi", "flask", "express", "nestjs"}
+ROUTED = {"django", "fastapi", "flask", "express", "nestjs", "laravel"}
 
 # Route-template placeholders: <int:uid> / <uid> (Django), {uid} (FastAPI/Nest), :uid (Express).
 _PLACEHOLDER = re.compile(r"<(?:\w+:)?(\w+)>|\{(\w+)(?::[^}]*)?\}|:(\w+)")
