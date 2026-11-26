@@ -174,6 +174,32 @@ class TestFlask(unittest.TestCase):
         self.assertIn(("/user", "name", "sqli"), paths)      # query route
 
 
+class TestBenchmark(unittest.TestCase):
+    """Improvement 4.7: the precision/recall benchmark over the labelled testbed
+    runs and the analyzer keeps full detection on the curated injection corpus."""
+
+    def setUp(self):
+        from sbvf.sast import benchmark
+        self.report = benchmark.run(SAMPLES)
+
+    def test_covers_the_labelled_samples(self):
+        names = {r["sample"] for r in self.report["per_sample"]}
+        # every taint sample with per-line VULN markers is scored
+        for s in ("php_native", "python_django", "python_flask", "php_laravel",
+                  "node_express"):
+            self.assertIn(s, names)
+
+    def test_full_precision_and_recall_on_corpus(self):
+        agg = self.report["aggregate"]
+        self.assertGreaterEqual(agg["expected"], 30)          # a non-trivial corpus
+        self.assertGreaterEqual(agg["recall"], 0.9)
+        self.assertGreaterEqual(agg["precision"], 0.9)
+
+    def test_no_false_negatives_listed(self):
+        misses = [fn for r in self.report["per_sample"] for fn in r["false_negative"]]
+        self.assertEqual(misses, [])
+
+
 class TestAnalyzerUnits(unittest.TestCase):
     def test_php_prepared_statement_not_flagged(self):
         src = ("<?php $id=$_GET['id'];"
