@@ -26,6 +26,10 @@ Examples
 
     # diff mode: only findings on lines changed vs a base ref (pull-request CI)
     python -m sbvf.scan_code . --diff origin/main --sarif results.sarif
+
+    # baseline: snapshot known findings once, then report only new ones
+    python -m sbvf.scan_code . --write-baseline .sbvf-baseline.json
+    python -m sbvf.scan_code . --baseline .sbvf-baseline.json
 """
 from __future__ import annotations
 
@@ -65,6 +69,12 @@ def main(argv=None):
     ap.add_argument("--diff-by", choices=("line", "file"), default="line",
                     help="granularity of --diff: 'line' (default) keeps findings on "
                     "changed lines; 'file' keeps any finding in a changed file")
+    ap.add_argument("--write-baseline", metavar="FILE",
+                    help="snapshot the current findings to FILE as a baseline, then "
+                    "exit (use on a known-good commit)")
+    ap.add_argument("--baseline", metavar="FILE",
+                    help="suppress findings present in this baseline FILE; report only "
+                    "findings new since it was written")
     ap.add_argument("--verbose", "-v", action="store_true",
                     help="also print every file and taint source")
     args = ap.parse_args(argv)
@@ -96,6 +106,25 @@ def main(argv=None):
         if cleanup:
             remove_tree(cleanup)
             print("[*] Removed temporary clone.")
+
+    if args.write_baseline:
+        from .sast.baseline import write_baseline
+        n = write_baseline(result, args.write_baseline)
+        print(f"[*] Baseline written: {n} finding(s) -> {args.write_baseline}")
+        return 0
+
+    if args.baseline:
+        from .sast.baseline import load_baseline, apply_baseline
+        try:
+            keys = load_baseline(args.baseline)
+        except (OSError, ValueError) as exc:
+            print(f"[x] {exc}", file=sys.stderr)
+            return 2
+        result = apply_baseline(result, keys)
+        b = result["baseline"]
+        print(f"[*] Baseline vs {args.baseline}: {b['new_findings']} new of "
+              f"{b['total_findings']} finding(s) ({b['suppressed']} already in the "
+              f"baseline of {b['baseline_size']}).")
 
     if args.diff:
         from .sast.diffscan import git_diff, changed_lines, filter_result

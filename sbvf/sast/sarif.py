@@ -91,18 +91,23 @@ def _rule_for(vuln: str) -> Dict:
     return rule
 
 
-def _fingerprint(f: Dict) -> str:
+def finding_fingerprint(f: Dict) -> str:
     """Stable per-finding id from the flow's *content*, not its line number.
 
     Hashing (vuln, file, source, sink, trimmed code) keeps the fingerprint the
     same when unrelated edits shift the finding up or down the file, so code
-    scanning treats it as the same alert across commits.
+    scanning treats it as the same alert across commits — and baseline mode (7.3)
+    reuses it as the finding identity so the two agree.
     """
     parts = [str(f.get("vuln", "")), str(f.get("file", "")),
              str(f.get("source", "")), str(f.get("sink", "")),
              str(f.get("code", "")).strip()]
     digest = hashlib.sha256("\u0000".join(parts).encode("utf-8")).hexdigest()
     return digest[:16]
+
+
+# Back-compat alias for the internal name used before it was made public.
+_fingerprint = finding_fingerprint
 
 
 def _message(f: Dict) -> str:

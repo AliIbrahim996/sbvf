@@ -217,6 +217,20 @@ def _counts(findings: List[Finding]) -> Dict:
     return {"by_vuln": by_vuln, "by_severity": by_sev}
 
 
+def counts_of_dicts(findings: List[Dict]) -> Dict:
+    """Recompute :func:`_counts` from serialized finding dicts.
+
+    Post-scan filters (diff / baseline) hold findings as dicts; this wraps each
+    back into a minimal :class:`Finding` so severity (a VULN_INFO-derived property)
+    is read the one way, here, instead of each filter re-deriving it.
+    """
+    views = [Finding(vuln=d.get("vuln", ""), file=d.get("file", ""),
+                     line=int(d.get("line", 0) or 0), sink=d.get("sink", ""),
+                     source=d.get("source", ""), framework=d.get("framework", ""))
+             for d in findings]
+    return _counts(views)
+
+
 def scan_path(root: str, on_step: Optional[Callable[[Step], None]] = None) -> Dict:
     """Convenience wrapper: scan *root* and return the result dict."""
     return Scanner(on_step=on_step).scan(root)
