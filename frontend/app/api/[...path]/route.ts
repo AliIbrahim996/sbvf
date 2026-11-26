@@ -10,12 +10,30 @@ export const dynamic = "force-dynamic";
 
 const API = process.env.SBVF_API_ORIGIN || "http://127.0.0.1:8080";
 
+// Carry the browser's session cookie through to the backend so multi-user auth
+// (when enabled) can identify the request. Only the Cookie header is forwarded.
+function passCookie(req: NextRequest, extra?: Record<string, string>): Record<string, string> {
+  const headers: Record<string, string> = { ...(extra || {}) };
+  const cookie = req.headers.get("cookie");
+  if (cookie) headers["cookie"] = cookie;
+  return headers;
+}
+
+// Relay a Set-Cookie from the backend (login/logout) back to the browser, so the
+// session cookie is stored for this same-origin frontend.
+function withSetCookie(upstream: Response, headers: Record<string, string>): Headers {
+  const out = new Headers(headers);
+  const setCookie = upstream.headers.get("set-cookie");
+  if (setCookie) out.set("set-cookie", setCookie);
+  return out;
+}
+
 export async function GET(req: NextRequest, ctx: { params: { path: string[] } }) {
   const target = `${API}/api/${ctx.params.path.join("/")}${req.nextUrl.search}`;
   let upstream: Response;
   try {
     upstream = await fetch(target, {
-      headers: { accept: "text/event-stream" },
+      headers: passCookie(req, { accept: "text/event-stream" }),
       cache: "no-store",
     });
   } catch {
@@ -26,12 +44,12 @@ export async function GET(req: NextRequest, ctx: { params: { path: string[] } })
   }
   return new Response(upstream.body, {
     status: upstream.status,
-    headers: {
+    headers: withSetCookie(upstream, {
       "Content-Type": upstream.headers.get("content-type") || "text/event-stream",
       "Cache-Control": "no-cache, no-transform",
       Connection: "keep-alive",
       "X-Accel-Buffering": "no",
-    },
+    }),
   });
 }
 
@@ -45,7 +63,7 @@ async function forward(req: NextRequest, ctx: { params: { path: string[] } }, me
     upstream = await fetch(target, {
       method,
       cache: "no-store",
-      headers: hasBody ? { "content-type": req.headers.get("content-type") || "application/json" } : undefined,
+      headers: passCookie(req, hasBody ? { "content-type": req.headers.get("content-type") || "application/json" } : {}),
       body: hasBody ? await req.text() : undefined,
     });
   } catch {
@@ -54,7 +72,7 @@ async function forward(req: NextRequest, ctx: { params: { path: string[] } }, me
   const body = await upstream.text();
   return new Response(body, {
     status: upstream.status,
-    headers: { "Content-Type": upstream.headers.get("content-type") || "application/json" },
+    headers: withSetCookie(upstream, { "Content-Type": upstream.headers.get("content-type") || "application/json" }),
   });
 }
 
@@ -72,10 +90,10 @@ export async function POST(req: NextRequest, ctx: { params: { path: string[] } }
     upstream = await fetch(target, {
       method: "POST",
       cache: "no-store",
-      headers: {
+      headers: passCookie(req, {
         "content-type": req.headers.get("content-type") || "application/json",
         accept: "text/event-stream",
-      },
+      }),
       body,
     });
   } catch {
@@ -84,13 +102,16 @@ export async function POST(req: NextRequest, ctx: { params: { path: string[] } }
       { status: 502, headers: { "Content-Type": "text/event-stream" } },
     );
   }
+  // Auth endpoints (login/register/logout) reply JSON with a Set-Cookie; stream
+  // endpoints reply SSE. Passing the body straight through handles both; relay
+  // any Set-Cookie so the session cookie lands on this same-origin frontend.
   return new Response(upstream.body, {
     status: upstream.status,
-    headers: {
+    headers: withSetCookie(upstream, {
       "Content-Type": upstream.headers.get("content-type") || "text/event-stream",
       "Cache-Control": "no-cache, no-transform",
       Connection: "keep-alive",
       "X-Accel-Buffering": "no",
-    },
+    }),
   });
 }
