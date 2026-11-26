@@ -19,6 +19,7 @@ from .engine import scan_path, Scanner
 from .bridge import derive_endpoints
 from .routes import extract_routes
 from .confirm import confirm_findings, TargetUnreachable
+from .sarif import to_sarif
 
 __all__ = ["Finding", "VULN_INFO", "scan_path", "Scanner", "derive_endpoints",
-           "extract_routes", "confirm_findings", "TargetUnreachable"]
+           "extract_routes", "confirm_findings", "TargetUnreachable", "to_sarif"]

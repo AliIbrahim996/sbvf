@@ -141,8 +141,37 @@ cross-owner access).
 # scan a bundled sample, a local folder, or clone-scan-remove a remote repo
 python -m sbvf.scan_code testbed/sast_samples/php_laravel
 python -m sbvf.scan_code path/to/project --json report.json
+python -m sbvf.scan_code path/to/project --sarif results.sarif   # GitHub code scanning
 python -m sbvf.scan_code https://github.com/user/project
 ```
+
+#### SARIF output (GitHub code scanning / GitLab SAST)
+
+`--sarif FILE` writes a **SARIF 2.1.0** log so findings surface as inline
+annotations on pull requests. Each vulnerability class becomes a SARIF rule with
+its CWE `helpUri`, a `security-severity` score (which GitHub reads to rank the
+alert) and the remediation steps as `help` text; each finding carries a
+content-based `partialFingerprint`, so an alert stays stable across edits that
+only shift line numbers. Wire it into CI with the official uploader:
+
+```yaml
+# .github/workflows/codeql-sbvf.yml
+permissions:
+  security-events: write
+jobs:
+  sbvf:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12" }
+      - run: python -m sbvf.scan_code . --sarif sbvf.sarif
+      - uses: github/codeql-action/upload-sarif@v3
+        with: { sarif_file: sbvf.sarif }
+```
+
+The CLI still exits non-zero when any high-severity finding is present, so it can
+also gate a build directly.
 
 The target is **either a local folder or a remote repository URL**. Remote
 repositories must be public and hosted on **GitHub, GitLab or Bitbucket**
