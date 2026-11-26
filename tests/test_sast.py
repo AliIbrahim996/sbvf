@@ -2162,5 +2162,79 @@ class TestSecretMasking(unittest.TestCase):
         self.assertIn("***", f.code)
 
 
+class TestSarif(unittest.TestCase):
+    """SARIF 2.1.0 export maps findings to code-scanning results (improvement 7.1)."""
+
+    @classmethod
+    def setUpClass(cls):
+        from sbvf.sast.sarif import to_sarif
+        cls.to_sarif = staticmethod(to_sarif)
+        # A sample with known injection findings (php_native has several).
+        cls.result = scan_path(os.path.join(SAMPLES, "php_native"))
+        cls.sarif = to_sarif(cls.result)
+
+    def test_envelope_and_tool_driver(self):
+        s = self.sarif
+        self.assertEqual(s["version"], "2.1.0")
+        self.assertIn("$schema", s)
+        self.assertEqual(len(s["runs"]), 1)
+        driver = s["runs"][0]["tool"]["driver"]
+        self.assertEqual(driver["name"], "SBVF")
+        self.assertTrue(driver["version"])            # version string present
+        self.assertTrue(driver["rules"])              # at least one rule
+
+    def test_one_result_per_finding(self):
+        results = self.sarif["runs"][0]["results"]
+        self.assertEqual(len(results), len(self.result["findings"]))
+        self.assertTrue(results, "sample should produce findings")
+
+    def test_result_shape_and_rule_linkage(self):
+        run = self.sarif["runs"][0]
+        rules = run["tool"]["driver"]["rules"]
+        rule_ids = [r["id"] for r in rules]
+        for res in run["results"]:
+            self.assertIn(res["ruleId"], rule_ids)
+            # ruleIndex, when present, points at the matching rule
+            self.assertEqual(rules[res["ruleIndex"]]["id"], res["ruleId"])
+            self.assertIn(res["level"], ("error", "warning", "note"))
+            loc = res["locations"][0]["physicalLocation"]
+            self.assertTrue(loc["artifactLocation"]["uri"])
+            self.assertGreaterEqual(loc["region"]["startLine"], 1)
+            self.assertIn("sbvfFlow/v1", res["partialFingerprints"])
+
+    def test_rules_carry_cwe_and_security_severity(self):
+        rules = self.sarif["runs"][0]["tool"]["driver"]["rules"]
+        for r in rules:
+            props = r["properties"]
+            self.assertIn("security", props["tags"])
+            self.assertIn("security-severity", props)
+            # a CWE-backed class exposes the MITRE helpUri and a cwe tag
+            if r["id"] in ("sqli", "xss", "command_injection"):
+                self.assertTrue(r["helpUri"].startswith("https://cwe.mitre.org/"))
+                self.assertTrue(any(t.startswith("external/cwe/cwe-") for t in props["tags"]))
+
+    def test_fingerprint_stable_across_line_shift(self):
+        from sbvf.sast.sarif import _fingerprint
+        f = {"vuln": "sqli", "file": "a.php", "source": "$_GET['id']",
+             "sink": "mysqli_query", "code": "  q(x)  ", "line": 10}
+        g = dict(f, line=99, code="q(x)")          # moved + whitespace-only change
+        self.assertEqual(_fingerprint(f), _fingerprint(g))
+        h = dict(f, sink="exec")                    # different sink -> different id
+        self.assertNotEqual(_fingerprint(f), _fingerprint(h))
+
+    def test_empty_result_is_valid_sarif(self):
+        s = self.to_sarif({"findings": []})
+        self.assertEqual(s["runs"][0]["results"], [])
+        self.assertEqual(s["runs"][0]["tool"]["driver"]["rules"], [])
+
+    def test_column_only_emitted_when_known(self):
+        from sbvf.sast.sarif import _result_for
+        no_col = _result_for({"vuln": "sqli", "file": "a.php", "line": 3, "column": 0}, {})
+        self.assertNotIn("startColumn", no_col["locations"][0]["physicalLocation"]["region"])
+        with_col = _result_for({"vuln": "sqli", "file": "a.php", "line": 3, "column": 5}, {})
+        self.assertEqual(
+            with_col["locations"][0]["physicalLocation"]["region"]["startColumn"], 5)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

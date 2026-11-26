@@ -20,6 +20,9 @@ Examples
 
     # machine-readable output
     python -m sbvf.scan_code path/to/project --json report.json
+
+    # SARIF for GitHub code scanning / GitLab SAST ingestion
+    python -m sbvf.scan_code path/to/project --sarif results.sarif
 """
 from __future__ import annotations
 
@@ -50,6 +53,8 @@ def main(argv=None):
                     help="local folder/file, or a GitHub/GitLab/Bitbucket repo URL")
     ap.add_argument("--repo", help="GitHub/GitLab/Bitbucket URL to clone, scan, delete")
     ap.add_argument("--json", help="write the full report to this JSON file")
+    ap.add_argument("--sarif", help="write findings as a SARIF 2.1.0 log to this "
+                    "file (for GitHub code scanning / GitLab SAST ingestion)")
     ap.add_argument("--verbose", "-v", action="store_true",
                     help="also print every file and taint source")
     args = ap.parse_args(argv)
@@ -95,6 +100,12 @@ def main(argv=None):
         with open(args.json, "w", encoding="utf-8") as fh:
             json.dump(result, fh, indent=2, ensure_ascii=False)
         print(f"  report written to {args.json}")
+
+    if args.sarif:
+        from .sast.sarif import to_sarif
+        with open(args.sarif, "w", encoding="utf-8") as fh:
+            json.dump(to_sarif(result), fh, indent=2, ensure_ascii=False)
+        print(f"  SARIF written to {args.sarif}")
 
     # non-zero exit if any high-severity finding (useful in CI gates)
     return 1 if counts["by_severity"].get("high", 0) else 0
