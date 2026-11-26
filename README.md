@@ -271,3 +271,30 @@ difficulty tier so the search's advantage (or lack of it) can be observed honest
 - **Recall** on vulnerable endpoints and **false-positive rate** on safe endpoints.
 - **Evals-to-first-detection** (efficiency), compared pairwise with the non-parametric
   **Mann-Whitney U** test and the **Vargha-Delaney Â12** effect size.
+
+### Static-analysis precision/recall benchmark
+
+The static analyzer is measured against the inline `VULN:` ground-truth markers in
+the labelled sample apps under `testbed/sast_samples/` (and the absence of markers
+on their safe counterparts). Reproduce it with:
+
+```bash
+py -3.12 -m sbvf.sast.benchmark --json results/sast_benchmark.json
+```
+
+Current result over the labelled injection corpus (10 samples, 38 marked sinks
+across PHP native/Yii/Laravel, Python native/Django/FastAPI/Flask, Node
+Express/NestJS, and a Django IDOR case):
+
+| metric | value |
+|---|---|
+| precision | 1.00 |
+| recall | 1.00 |
+| F1 | 1.00 |
+
+Matching is class-aware with a ±2-line tolerance for marker/sink placement. These
+numbers are on a small, curated corpus the analyzer is developed against, so they
+measure "no regressions on known cases", not generalisation — the harness is meant
+to be re-run on larger external corpora. Rule-based samples (crypto, deserialization,
+misconfiguration, error handling, supply chain) use section headers rather than
+per-line markers and are reported separately by the tool.
