@@ -1,9 +1,11 @@
 "use client";
 import Link from "next/link";
 import { useCallback, useEffect, useState } from "react";
+import { AuthGate } from "@/components/AuthGate";
 import { FindingCard } from "@/components/FindingCard";
 import { Nav } from "@/components/Nav";
 import { ActivityIcon, BackIcon } from "@/components/icons";
+import { useAuth } from "@/lib/auth";
 import { exportPdf } from "@/lib/pdf";
 import type {
   ActivityEntry,
@@ -57,6 +59,7 @@ async function readSse(res: Response, onEvent: (event: string, data: any) => voi
 
 export default function ScanDetail({ params }: { params: { id: string } }) {
   const id = params.id;
+  const { authEnabled, user, loading: authLoading, refresh } = useAuth();
   const [scan, setScan] = useState<StoredScan | null>(null);
   const [activity, setActivity] = useState<ActivityEntry[]>([]);
   const [state, setState] = useState<"loading" | "ok" | "off" | "missing">("loading");
@@ -69,9 +72,12 @@ export default function ScanDetail({ params }: { params: { id: string } }) {
   const [aiError, setAiError] = useState("");
 
   useEffect(() => {
+    if (authLoading) return;
+    if (authEnabled && !user) return;        // gated; AuthGate shows the sign-in prompt
     (async () => {
       try {
         const r = await fetch(`/api/scans/${id}`);
+        if (r.status === 401) return refresh();
         if (r.status === 503) return setState("off");
         if (r.status === 404) return setState("missing");
         const d = (await r.json()) as StoredScan;
@@ -93,7 +99,7 @@ export default function ScanDetail({ params }: { params: { id: string } }) {
         setState("missing");
       }
     })();
-  }, [id]);
+  }, [id, authLoading, authEnabled, user]);  // eslint-disable-line react-hooks/exhaustive-deps
 
   const runAgents = useCallback(async () => {
     setRunning(true);
@@ -164,6 +170,7 @@ export default function ScanDetail({ params }: { params: { id: string } }) {
         {scan && <p className="mono">{scan.root} · {fmtDate(scan.created_at)}</p>}
       </header>
 
+      <AuthGate>
       {state === "off" ? (
         <div className="empty">History requires the database service.</div>
       ) : state === "missing" ? (
@@ -248,6 +255,7 @@ export default function ScanDetail({ params }: { params: { id: string } }) {
           )}
         </>
       ) : null}
+      </AuthGate>
 
       <footer>SBVF research prototype · all targets run on 127.0.0.1 · for academic use only</footer>
     </div>

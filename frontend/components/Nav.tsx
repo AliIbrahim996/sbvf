@@ -1,6 +1,23 @@
 "use client";
 import Link from "next/link";
 import { useEffect, useState, type ReactNode } from "react";
+import { useAuth } from "@/lib/auth";
+
+/** Sign-in link / current user + logout, shown only when the backend has
+ *  multi-user auth enabled (otherwise the nav is unchanged). */
+function AuthControls() {
+  const { authEnabled, user, logout } = useAuth();
+  if (!authEnabled) return null;
+  if (!user) return <Link href="/login" className="nav-link">Sign in</Link>;
+  return (
+    <span className="nav-user">
+      <span className="nav-user-name" title={user.role === "admin" ? "admin" : "user"}>
+        {user.username}{user.role === "admin" ? " ·admin" : ""}
+      </span>
+      <button className="nav-link" onClick={() => logout()} aria-label="Sign out">Sign out</button>
+    </span>
+  );
+}
 
 /** Shared top bar: SVG shield wordmark (links home), an optional right slot,
  *  and the light/dark theme toggle. */
@@ -40,6 +57,7 @@ export function Nav({ right }: { right?: ReactNode }) {
       <span className="nav-right">
         <Link href="/history" className="nav-link">History</Link>
         {right}
+        <AuthControls />
         <button className="theme-btn" onClick={toggleTheme} aria-label="Toggle colour theme" title="Toggle theme">
           {theme !== "light" ? (
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">

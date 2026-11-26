@@ -1,5 +1,6 @@
 "use client";
 import { useEffect, useRef, useState } from "react";
+import { AuthGate } from "@/components/AuthGate";
 import { FindingCard } from "@/components/FindingCard";
 import { Nav } from "@/components/Nav";
 import { exportPdf } from "@/lib/pdf";
@@ -194,6 +195,7 @@ export default function ScanPage() {
         <p>Pick a bundled sample or point SBVF at a local folder or a Git repository URL.</p>
       </header>
 
+      <AuthGate>
       <div className="control">
         <div className="field">
           <label htmlFor="sample">Sample project</label>
@@ -329,6 +331,7 @@ export default function ScanPage() {
           )}
         </div>
       </div>
+      </AuthGate>
 
       <footer>SBVF research prototype · all targets run on 127.0.0.1 · for academic use only</footer>
     </div>

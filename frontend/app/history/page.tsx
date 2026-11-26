@@ -2,8 +2,10 @@
 import Link from "next/link";
 import { useEffect, useState } from "react";
 import { AskPanel } from "@/components/AskPanel";
+import { AuthGate } from "@/components/AuthGate";
 import { Nav } from "@/components/Nav";
 import { ActivityIcon } from "@/components/icons";
+import { useAuth } from "@/lib/auth";
 import type { ActivityEntry, ScanSummary } from "@/lib/types";
 
 const fmtDate = (s: string) => {
@@ -20,6 +22,7 @@ const highCrit = (s: ScanSummary) => {
 };
 
 export default function HistoryPage() {
+  const { authEnabled, user, loading: authLoading, refresh } = useAuth();
   const [scans, setScans] = useState<ScanSummary[] | null>(null);
   const [activity, setActivity] = useState<ActivityEntry[]>([]);
   const [off, setOff] = useState(false);
@@ -28,6 +31,10 @@ export default function HistoryPage() {
   async function load() {
     try {
       const r = await fetch("/api/scans");
+      if (r.status === 401) {       // session expired → let AuthGate take over
+        refresh();
+        return;
+      }
       if (r.status === 503) {
         setOff(true);
         setScans([]);
@@ -44,8 +51,11 @@ export default function HistoryPage() {
   }
 
   useEffect(() => {
+    // Wait until auth state is known; only fetch when not gated (auth off or signed in).
+    if (authLoading) return;
+    if (authEnabled && !user) return;
     load();
-  }, []);
+  }, [authLoading, authEnabled, user]);  // eslint-disable-line react-hooks/exhaustive-deps
 
   async function remove(id: number) {
     if (!confirm(`Delete scan #${id}? This cannot be undone.`)) return;
@@ -66,6 +76,7 @@ export default function HistoryPage() {
         <p>Every scan is stored with its findings and an activity log.</p>
       </header>
 
+      <AuthGate>
       {off ? (
         <div className="empty">
           History requires the database service. Run with Docker Compose (which starts
@@ -135,6 +146,7 @@ export default function HistoryPage() {
           )}
         </>
       )}
+      </AuthGate>
 
       <footer>SBVF research prototype · all targets run on 127.0.0.1 · for academic use only</footer>
     </div>

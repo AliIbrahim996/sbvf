@@ -155,6 +155,22 @@ export interface ChatMessage {
   details?: { sources?: AskSource[] } & Record<string, unknown>;
 }
 
+// ---- Multi-user auth (optional; active only when the backend runs with SBVF_AUTH) ----
+export interface AuthUser {
+  id: number;
+  username: string;
+  role: "admin" | "user";
+  created_at?: string | null;
+  last_login_at?: string | null;
+}
+
+// Shape of GET /api/auth/me.
+export interface AuthMe {
+  authenticated: boolean;
+  auth_enabled: boolean;
+  user?: AuthUser | null;
+}
+
 export const SAMPLES: { value: string; label: string }[] = [
   { value: "php_native", label: "PHP · native" },
   { value: "php_yii", label: "PHP · Yii" },
